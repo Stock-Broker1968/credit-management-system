@@ -4,3 +4,4 @@ Flask-WTF
 pandas
 plotly
 python-dotenv
+gunicorn
