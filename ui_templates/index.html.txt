@@ -1,0 +1,179 @@
+index.html
+{% extends "base.html" %}
+
+{% block title %}Inicio - Sistema de Gestión de Crédito{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="jumbotron bg-gradient text-white p-5 rounded" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+            <h1 class="display-4">
+                <i class="fas fa-chart-line me-3"></i>
+                Sistema de Gestión de Crédito
+            </h1>
+            <p class="lead">
+                Plataforma integral para análisis de riesgo crediticio, cumplimiento normativo y gestión de cartera
+            </p>
+            <hr class="my-4" style="border-color: rgba(255,255,255,0.3);">
+            <p>Diseñado específicamente para profesionales en gestión de riesgos financieros</p>
+            <a class="btn btn-light btn-lg" href="{{ url_for('dashboard') }}" role="button">
+                <i class="fas fa-tachometer-alt me-2"></i>
+                Ir al Dashboard
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- Tarjetas de estadísticas -->
+<div class="row mt-4">
+    <div class="col-md-3">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.total_customers or 0 }}</h4>
+                        <p class="card-text">Clientes Totales</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-users fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="{{ url_for('customers') }}" class="text-white">
+                    <small>Ver detalles <i class="fas fa-arrow-right"></i></small>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3">
+        <div class="card bg-warning text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.pending_applications or 0 }}</h4>
+                        <p class="card-text">Solicitudes Pendientes</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-clock fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="{{ url_for('applications') }}" class="text-white">
+                    <small>Revisar solicitudes <i class="fas fa-arrow-right"></i></small>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.active_loans or 0 }}</h4>
+                        <p class="card-text">Préstamos Activos</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-money-bill-wave fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="#" class="text-white">
+                    <small>Ver cartera <i class="fas fa-arrow-right"></i></small>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3">
+        <div class="card bg-danger text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.risk_alerts or 0 }}</h4>
+                        <p class="card-text">Alertas de Riesgo</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-exclamation-triangle fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="{{ url_for('risk_analysis') }}" class="text-white">
+                    <small>Análisis completo <i class="fas fa-arrow-right"></i></small>
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Sección de acciones rápidas -->
+<div class="row mt-5">
+    <div class="col-12">
+        <h3><i class="fas fa-bolt text-warning"></i> Acciones Rápidas</h3>
+        <hr>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header bg-info text-white">
+                <h5><i class="fas fa-user-plus"></i> Nuevo Cliente</h5>
+            </div>
+            <div class="card-body">
+                <p>Registrar un nuevo cliente en el sistema para evaluación crediticia</p>
+                <a href="{{ url_for('customers') }}" class="btn btn-info">
+                    <i class="fas fa-plus"></i> Agregar Cliente
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header bg-warning text-white">
+                <h5><i class="fas fa-file-alt"></i> Nueva Solicitud</h5>
+            </div>
+            <div class="card-body">
+                <p>Crear una nueva solicitud de crédito para análisis de riesgo</p>
+                <a href="{{ url_for('applications') }}" class="btn btn-warning">
+                    <i class="fas fa-plus"></i> Nueva Solicitud
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header bg-danger text-white">
+                <h5><i class="fas fa-chart-bar"></i> Análisis de Riesgo</h5>
+            </div>
+            <div class="card-body">
+                <p>Ejecutar análisis completo de riesgo crediticio y cumplimiento</p>
+                <a href="{{ url_for('risk_analysis') }}" class="btn btn-danger">
+                    <i class="fas fa-search"></i> Analizar Riesgo
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Información del sistema -->
+<div class="row mt-5">
+    <div class="col-12">
+        <div class="alert alert-info">
+            <h5><i class="fas fa-info-circle"></i> Información del Sistema</h5>
+            <p class="mb-0">
+                Este sistema está diseñado para profesionales en gestión de riesgos financieros, 
+                proporcionando herramientas avanzadas para el análisis crediticio, cumplimiento normativo 
+                y optimización de procesos mediante inteligencia artificial.
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}
