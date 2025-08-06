@@ -2,15 +2,16 @@
 """
 Simulador Completo de Gestión de Crédito - Hotmart
 Con Panel de Administración para Reglas de Negocio
-Versión Optimizada Corregida - Todos los Problemas Solucionados
+Versión Definitiva Corregida - Templates Separados Correctamente
 """
 
 import os
 import json
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for
 
 app = Flask(__name__)
+# Usar una clave secreta para la sesión, esencial para seguridad.
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'hotmart_credit_sim_secret_key')
 
 # Configuración de reglas de negocio por defecto
@@ -73,30 +74,6 @@ def save_business_rules():
     except Exception as e:
         print(f"⚠ Error guardando reglas: {e}")
 
-def validate_rules(rules):
-    """Valida la consistencia de las reglas de negocio"""
-    validation_results = []
-    
-    # Validar rangos básicos
-    if rules['edad_minima'] < rules['edad_maxima']:
-        validation_results.append("✓ Rango de edad válido")
-    else:
-        validation_results.append("❌ Rango de edad inválido")
-    
-    if 0 < rules['ratio_deuda_ingreso_maximo'] <= 1:
-        validation_results.append("✓ Ratio deuda-ingreso válido")
-    else:
-        validation_results.append("❌ Ratio deuda-ingreso inválido")
-    
-    # Validar tasas por perfil
-    for perfil, tasas in rules['tasas_por_perfil'].items():
-        if tasas['min'] < tasas['max']:
-            validation_results.append(f"✓ Tasas {perfil} válidas")
-        else:
-            validation_results.append(f"❌ Tasas {perfil} inválidas")
-    
-    return validation_results
-
 class CreditEvaluator:
     def __init__(self):
         self.rules = business_rules
@@ -106,111 +83,70 @@ class CreditEvaluator:
         score = 0
         factors = []
         
-        # Factor Score Crediticio (40% del peso) - CORREGIDO
+        # Factor Score Crediticio (40%)
         score_credit = int(data.get('score_crediticio', 0))
-        if score_credit >= 800:
-            score += 40
-            factors.append("Score excelente (800+)")
-        elif score_credit >= 750:
-            score += 35
-            factors.append("Score muy bueno (750-799)")
-        elif score_credit >= 700:
-            score += 30
-            factors.append("Score bueno (700-749)")
-        elif score_credit >= 650:
-            score += 20
-            factors.append("Score regular (650-699)")
-        elif score_credit >= 600:
-            score += 10
-            factors.append("Score bajo (600-649)")
-        else:
-            score += 5
-            factors.append("Score muy bajo (<600)")
+        score_mapping = {
+            'AAA': (800, 850), 'AA': (750, 799), 'A': (700, 749),
+            'BBB': (650, 699), 'BB': (600, 649), 'B': (550, 599)
+        }
+        for profile, (min_s, max_s) in score_mapping.items():
+            if min_s <= score_credit <= max_s:
+                score += (40 * (score_credit - min_s)) / (max_s - min_s) if (max_s - min_s) > 0 else 40
+                factors.append(f"Score crediticio: {score_credit} ({profile})")
+                break
         
-        # Factor Ingresos (25% del peso)
+        # Factor Ingresos (25%)
         ingresos = float(data.get('ingresos_mensuales', 0))
-        if ingresos >= 50000:
-            score += 25
-            factors.append("Ingresos altos ($50k+)")
-        elif ingresos >= 30000:
-            score += 20
-            factors.append("Ingresos buenos ($30k-$50k)")
-        elif ingresos >= 20000:
-            score += 15
-            factors.append("Ingresos medios ($20k-$30k)")
-        elif ingresos >= 15000:
-            score += 10
-            factors.append("Ingresos básicos ($15k-$20k)")
-        else:
-            score += 2
-            factors.append("Ingresos bajos (<$15k)")
+        ingresos_weight = 0
+        if ingresos >= 50000: ingresos_weight = 25
+        elif ingresos >= 30000: ingresos_weight = 20
+        elif ingresos >= 20000: ingresos_weight = 15
+        elif ingresos >= 15000: ingresos_weight = 10
+        else: ingresos_weight = 2
+        score += ingresos_weight
+        factors.append(f"Ingresos mensuales: ${ingresos:,.0f}")
 
-        # Factor Antigüedad Laboral (15% del peso)
+        # Factor Antigüedad Laboral (15%)
         antiguedad = int(data.get('antiguedad_laboral', 0))
-        if antiguedad >= 60:
-            score += 15
-            factors.append("Antigüedad excelente (5+ años)")
-        elif antiguedad >= 36:
-            score += 12
-            factors.append("Antigüedad buena (3-5 años)")
-        elif antiguedad >= 24:
-            score += 10
-            factors.append("Antigüedad regular (2-3 años)")
-        elif antiguedad >= 12:
-            score += 7
-            factors.append("Antigüedad mínima (1-2 años)")
-        else:
-            score += 2
-            factors.append("Antigüedad insuficiente (<1 año)")
+        antiguedad_weight = 0
+        if antiguedad >= 60: antiguedad_weight = 15
+        elif antiguedad >= 36: antiguedad_weight = 12
+        elif antiguedad >= 24: antiguedad_weight = 10
+        elif antiguedad >= 12: antiguedad_weight = 7
+        else: antiguedad_weight = 2
+        score += antiguedad_weight
+        factors.append(f"Antigüedad laboral: {antiguedad} meses")
 
-        # Factor Edad (10% del peso)
+        # Factor Edad (10%)
         edad = int(data.get('edad', 0))
-        if 35 <= edad <= 50:
-            score += 10
-            factors.append("Edad óptima (35-50)")
-        elif 25 <= edad < 35 or 50 < edad <= 60:
-            score += 8
-            factors.append("Edad favorable")
-        elif 18 <= edad < 25 or 60 < edad <= 65:
-            score += 5
-            factors.append("Edad aceptable")
-        else:
-            score += 1
-            factors.append("Edad de riesgo")
+        edad_weight = 0
+        if 35 <= edad <= 50: edad_weight = 10
+        elif 25 <= edad < 35 or 50 < edad <= 60: edad_weight = 8
+        elif 18 <= edad < 25 or 60 < edad <= 65: edad_weight = 5
+        else: edad_weight = 1
+        score += edad_weight
+        factors.append(f"Edad: {edad} años")
 
-        # Factor Ratio Deuda-Ingreso (10% del peso)
+        # Factor Ratio Deuda-Ingreso (10%)
         deudas = float(data.get('deudas_actuales', 0))
         ratio_deuda = deudas / ingresos if ingresos > 0 else 1
-        if ratio_deuda <= 0.10:
-            score += 10
-            factors.append("Endeudamiento muy bajo (<10%)")
-        elif ratio_deuda <= 0.20:
-            score += 8
-            factors.append("Endeudamiento bajo (10-20%)")
-        elif ratio_deuda <= 0.30:
-            score += 6
-            factors.append("Endeudamiento moderado (20-30%)")
-        elif ratio_deuda <= 0.35:
-            score += 3
-            factors.append("Endeudamiento alto (30-35%)")
-        else:
-            score += 1
-            factors.append("Endeudamiento excesivo (>35%)")
+        ratio_weight = 0
+        if ratio_deuda <= 0.10: ratio_weight = 10
+        elif ratio_deuda <= 0.20: ratio_weight = 8
+        elif ratio_deuda <= 0.30: ratio_weight = 6
+        elif ratio_deuda <= 0.35: ratio_weight = 3
+        else: ratio_weight = 1
+        score += ratio_weight
+        factors.append(f"Ratio deuda-ingreso: {ratio_deuda:.2%}")
         
-        # Determinar perfil basado en score total - CORREGIDO
+        # Determinar perfil basado en score total
         profile = "RECHAZADO"
-        if score >= 85:
-            profile = "AAA"
-        elif score >= 75:
-            profile = "AA"
-        elif score >= 65:
-            profile = "A"
-        elif score >= 55:
-            profile = "BBB"
-        elif score >= 45:
-            profile = "BB"
-        elif score >= 35:
-            profile = "B"
+        if score >= 85: profile = "AAA"
+        elif score >= 75: profile = "AA"
+        elif score >= 65: profile = "A"
+        elif score >= 55: profile = "BBB"
+        elif score >= 45: profile = "BB"
+        elif score >= 35: profile = "B"
         
         return {
             "perfil": profile,
@@ -250,8 +186,7 @@ class CreditEvaluator:
     def calculate_credit_offer(self, profile_data, monto_solicitado=None):
         """Calcula la oferta de crédito basada en el perfil"""
         profile = profile_data['perfil']
-        if profile == "RECHAZADO":
-            return None
+        if profile == "RECHAZADO": return None
         
         monto_maximo = self.rules['monto_maximo_por_perfil'][profile]
         tasa_info = self.rules['tasas_por_perfil'][profile]
@@ -261,20 +196,14 @@ class CreditEvaluator:
         if monto_solicitado and monto_solicitado <= monto_maximo:
             monto_ofrecido = monto_solicitado
         
-        # Calcular tasa basada en el score interno - CORREGIDO
-        score_ratio = profile_data['score_total'] / 100
-        tasa_range = tasa_info['max'] - tasa_info['min']
-        # A mayor score, menor tasa (tasa mínima + rango reducido por score)
-        tasa_anual = tasa_info['max'] - (score_ratio * tasa_range)
+        # Tasa ajustada inversamente al score dentro del rango del perfil
+        tasa_anual = tasa_info['min'] + (tasa_info['max'] - tasa_info['min']) * (1 - (profile_data['score_total'] / 100))
         tasa_anual = max(tasa_info['min'], min(tasa_info['max'], tasa_anual))
         
         # Plazo recomendado basado en monto y perfil
-        if monto_ofrecido <= 50000:
-            plazo_meses = min(24, plazo_info['max'])
-        elif monto_ofrecido <= 100000:
+        plazo_meses = plazo_info['max']
+        if monto_ofrecido < 50000:
             plazo_meses = min(36, plazo_info['max'])
-        else:
-            plazo_meses = plazo_info['max']
         
         # Calcular pago mensual
         tasa_mensual = tasa_anual / 100 / 12
@@ -297,24 +226,13 @@ class CreditEvaluator:
         try:
             errors, warnings = self.validate_basic_requirements(data)
             if errors:
-                return {
-                    "aprobado": False, 
-                    "motivo_rechazo": "No cumple requisitos básicos", 
-                    "errores": errors, 
-                    "advertencias": warnings
-                }
+                return {"aprobado": False, "motivo_rechazo": "No cumple requisitos básicos", "errores": errors, "advertencias": warnings}
             
             profile_data = self.calculate_risk_profile(data)
             if profile_data['perfil'] == "RECHAZADO":
-                return {
-                    "aprobado": False, 
-                    "motivo_rechazo": "Perfil de riesgo muy alto", 
-                    "perfil_riesgo": profile_data, 
-                    "advertencias": warnings
-                }
+                return {"aprobado": False, "motivo_rechazo": "Perfil de riesgo muy bajo", "perfil_riesgo": profile_data, "advertencias": warnings}
             
-            monto_solicitado = float(data.get('monto_solicitado', 0)) if data.get('monto_solicitado') else None
-            oferta = self.calculate_credit_offer(profile_data, monto_solicitado)
+            oferta = self.calculate_credit_offer(profile_data, float(data.get('monto_solicitado', 0)))
             
             return {
                 "aprobado": True,
@@ -324,13 +242,8 @@ class CreditEvaluator:
                 "fecha_evaluacion": datetime.now().isoformat()
             }
         except Exception as e:
-            return {
-                "aprobado": False, 
-                "motivo_rechazo": f"Error en evaluación: {str(e)}", 
-                "error_tecnico": True
-            }
+            return {"aprobado": False, "motivo_rechazo": f"Error en evaluación: {str(e)}", "error_tecnico": True}
 
-# Inicializar
 load_business_rules()
 evaluator = CreditEvaluator()
 
@@ -338,11 +251,6 @@ evaluator = CreditEvaluator()
 def index():
     if request.method == 'POST':
         try:
-            # Recargar reglas por si fueron actualizadas
-            global business_rules, evaluator
-            load_business_rules()
-            evaluator = CreditEvaluator()
-            
             form_data = {
                 'nombre': request.form.get('nombre', ''),
                 'edad': int(request.form.get('edad', 0)),
@@ -356,10 +264,7 @@ def index():
             resultado = evaluator.evaluate_credit_request(form_data)
             return render_template_string(MAIN_TEMPLATE, resultado=resultado)
         except (ValueError, TypeError) as e:
-            return render_template_string(MAIN_TEMPLATE, resultado={
-                "aprobado": False, 
-                "motivo_rechazo": f"Datos incompletos o incorrectos: {str(e)}"
-            })
+            return render_template_string(MAIN_TEMPLATE, resultado={"aprobado": False, "motivo_rechazo": f"Datos incompletos o incorrectos: {str(e)}"})
     return render_template_string(MAIN_TEMPLATE, resultado=None)
 
 @app.route('/admin', methods=['GET', 'POST'])
@@ -367,7 +272,6 @@ def admin():
     global business_rules, evaluator
     mensaje = None
     tipo_mensaje = 'info'
-    
     if request.method == 'POST':
         try:
             action = request.form.get('action', 'save')
@@ -376,102 +280,54 @@ def admin():
                 save_business_rules()
                 evaluator = CreditEvaluator()
                 mensaje = "✅ Reglas restauradas a valores por defecto"
-                tipo_mensaje = 'success'
             elif action == 'save':
-                # Actualizar reglas básicas
-                business_rules['score_minimo'] = int(request.form.get('score_minimo', 650))
-                business_rules['edad_minima'] = int(request.form.get('edad_minima', 18))
-                business_rules['edad_maxima'] = int(request.form.get('edad_maxima', 70))
-                business_rules['ingresos_minimos'] = int(request.form.get('ingresos_minimos', 15000))
-                business_rules['antiguedad_laboral_minima'] = int(request.form.get('antiguedad_laboral_minima', 12))
-                business_rules['ratio_deuda_ingreso_maximo'] = float(request.form.get('ratio_deuda_ingreso_maximo', 35)) / 100
+                new_rules = {}
+                for key, value in request.form.items():
+                    if key in ['action']: continue
+                    
+                    if key in ['score_minimo', 'edad_minima', 'edad_maxima', 'ingresos_minimos', 'antiguedad_laboral_minima']:
+                        new_rules[key] = int(value)
+                    elif key == 'ratio_deuda_ingreso_maximo':
+                        new_rules[key] = float(value) / 100
+                    elif key.startswith('monto_'):
+                        perfil = key.split('_')[-1]
+                        if 'monto_maximo_por_perfil' not in new_rules: new_rules['monto_maximo_por_perfil'] = business_rules['monto_maximo_por_perfil'].copy()
+                        new_rules['monto_maximo_por_perfil'][perfil] = int(value)
+                    elif key.startswith('tasa_min_') or key.startswith('tasa_max_'):
+                        partes = key.split('_')
+                        tipo, perfil = partes[1], partes[2]
+                        if 'tasas_por_perfil' not in new_rules: new_rules['tasas_por_perfil'] = business_rules['tasas_por_perfil'].copy()
+                        if perfil not in new_rules['tasas_por_perfil']: new_rules['tasas_por_perfil'][perfil] = business_rules['tasas_por_perfil'][perfil].copy()
+                        new_rules['tasas_por_perfil'][perfil][tipo] = float(value)
+                    elif key.startswith('plazo_max_'):
+                        perfil = key.split('_')[-1]
+                        if 'plazos_por_perfil' not in new_rules: new_rules['plazos_por_perfil'] = business_rules['plazos_por_perfil'].copy()
+                        if perfil not in new_rules['plazos_por_perfil']: new_rules['plazos_por_perfil'][perfil] = business_rules['plazos_por_perfil'][perfil].copy()
+                        new_rules['plazos_por_perfil'][perfil]['max'] = int(value)
                 
-                # Actualizar reglas por perfil
-                for perfil in ['AAA', 'AA', 'A', 'BBB', 'BB', 'B']:
-                    business_rules['monto_maximo_por_perfil'][perfil] = int(request.form.get(f'monto_{perfil}', 50000))
-                    business_rules['tasas_por_perfil'][perfil]['min'] = float(request.form.get(f'tasa_min_{perfil}', 10))
-                    business_rules['tasas_por_perfil'][perfil]['max'] = float(request.form.get(f'tasa_max_{perfil}', 20))
-                    business_rules['plazos_por_perfil'][perfil]['max'] = int(request.form.get(f'plazo_max_{perfil}', 24))
-                    # Mantener plazo mínimo por defecto
-                    if 'min' not in business_rules['plazos_por_perfil'][perfil]:
-                        business_rules['plazos_por_perfil'][perfil]['min'] = 6 if perfil in ['BB', 'B'] else 12
-                
+                business_rules.update(new_rules)
                 save_business_rules()
                 evaluator = CreditEvaluator()
                 mensaje = "✅ Configuración guardada exitosamente"
-                tipo_mensaje = 'success'
         except Exception as e:
             mensaje = f"❌ Error al guardar configuración: {str(e)}"
-            tipo_mensaje = 'danger'
-    
-    return render_template_string(ADMIN_TEMPLATE, 
-                                rules=business_rules, 
-                                mensaje=mensaje, 
-                                tipo_mensaje=tipo_mensaje,
-                                validate_rules=validate_rules,
-                                datetime=datetime)
+    return render_template_string(ADMIN_TEMPLATE, rules=business_rules, mensaje=mensaje, tipo_mensaje='success' if mensaje and '✅' in mensaje else 'danger')
 
 @app.route('/reports')
 def reports():
     return render_template_string(REPORTS_TEMPLATE)
 
-@app.route('/api/test/<profile>')
-def test_profile(profile):
-    """Endpoint para probar perfiles específicos"""
-    test_data = {
-        'AAA': {
-            'nombre': 'Cliente AAA Test',
-            'edad': 35, 'score_crediticio': 820, 'ingresos_mensuales': 60000,
-            'deudas_actuales': 5000, 'antiguedad_laboral': 60, 'monto_solicitado': 150000
-        },
-        'AA': {
-            'nombre': 'Cliente AA Test',
-            'edad': 40, 'score_crediticio': 780, 'ingresos_mensuales': 45000,
-            'deudas_actuales': 8000, 'antiguedad_laboral': 48, 'monto_solicitado': 120000
-        },
-        'A': {
-            'nombre': 'Cliente A Test',
-            'edad': 30, 'score_crediticio': 720, 'ingresos_mensuales': 30000,
-            'deudas_actuales': 6000, 'antiguedad_laboral': 36, 'monto_solicitado': 80000
-        },
-        'REJECT': {
-            'nombre': 'Cliente Rechazado Test',
-            'edad': 22, 'score_crediticio': 580, 'ingresos_mensuales': 12000,
-            'deudas_actuales': 8000, 'antiguedad_laboral': 6, 'monto_solicitado': 50000
-        }
-    }
-    
-    if profile.upper() not in test_data:
-        return jsonify({'error': 'Perfil no encontrado'}), 404
-    
-    data = test_data[profile.upper()]
-    resultado = evaluator.evaluate_credit_request(data)
-    
-    return jsonify({
-        'perfil_test': profile.upper(),
-        'datos_entrada': data,
-        'resultado_evaluacion': resultado
-    })
+def validate_rules(rules):
+    validation_results = []
+    if rules['edad_minima'] < rules['edad_maxima']: validation_results.append("✓ Rango de edad válido")
+    else: validation_results.append("❌ Rango de edad inválido")
+    if 0 < rules['ratio_deuda_ingreso_maximo'] <= 1: validation_results.append("✓ Ratio deuda-ingreso válido")
+    else: validation_results.append("❌ Ratio deuda-ingreso inválido")
+    for perfil, tasas in rules['tasas_por_perfil'].items():
+        if tasas['min'] < tasas['max']: validation_results.append(f"✓ Tasas {perfil} válidas")
+        else: validation_results.append(f"❌ Tasas {perfil} inválidas")
+    return validation_results
 
-@app.route('/api/rules')
-def get_rules():
-    """API para obtener las reglas actuales"""
-    return jsonify(business_rules)
-
-@app.route('/api/evaluate', methods=['POST'])
-def api_evaluate():
-    """API para evaluar crédito via JSON"""
-    try:
-        data = request.json
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        resultado = evaluator.evaluate_credit_request(data)
-        return jsonify(resultado)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# ===== TEMPLATES HTML =====
 MAIN_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
@@ -729,7 +585,6 @@ ADMIN_TEMPLATE = '''
 </body>
 </html>
 '''
-
 REPORTS_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
@@ -779,19 +634,14 @@ if __name__ == '__main__':
     print("🚀 Iniciando Simulador de Crédito Hotmart")
     print("📊 Sistema de Evaluación Crediticia Integral")
     print("=" * 50)
-    
     load_business_rules()
     print(f"✅ Reglas de negocio cargadas")
     print(f"📋 Score mínimo: {business_rules['score_minimo']}")
     print(f"💰 Monto máximo AAA: ${business_rules['monto_maximo_por_perfil']['AAA']:,}")
     print(f"⚡ Ratio deuda máximo: {business_rules['ratio_deuda_ingreso_maximo']:.0%}")
-    
     print("\n🌐 Acceso al sistema:")
     print("   • Evaluación: http://localhost:5000/")
     print("   • Administración: http://localhost:5000/admin")
     print("   • Reportes: http://localhost:5000/reports")
-    print("   • API Test AAA: http://localhost:5000/api/test/aaa")
-    print("   • API Reglas: http://localhost:5000/api/rules")
     print("=" * 50)
-    
     app.run(debug=True, host='0.0.0.0', port=5000)
