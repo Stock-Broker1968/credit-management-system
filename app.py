@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
 Simulador Completo de Gestión de Crédito - Hotmart
-Con Panel de Administración para Reglas de Negocio
-Versión Optimizada Corregida - Todos los Problemas Solucionados
+Con Panel de Administración Seguro y Dashboard de Reportes
+Versión Optimizada con Clave RAG123 y Sistema de Reportes Mejorado
 """
 
 import os
 import json
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for, flash
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'hotmart_credit_sim_secret_key')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'hotmart_credit_sim_secret_key_2025')
+
+# Clave de acceso al módulo de administración
+ADMIN_ACCESS_KEY = "RAG123"
+
+# Lista para almacenar simulaciones de la sesión (máximo 10)
+session_simulations = []
 
 # Configuración de reglas de negocio por defecto
 DEFAULT_RULES = {
@@ -19,7 +25,7 @@ DEFAULT_RULES = {
     "edad_minima": 18,
     "edad_maxima": 70,
     "ingresos_minimos": 15000,
-    "antiguedad_laboral_minima": 12,  # en meses
+    "antiguedad_laboral_minima": 1,  # EN AÑOS
     "ratio_deuda_ingreso_maximo": 0.35,
     "monto_maximo_por_perfil": {
         "AAA": 200000, "AA": 150000, "A": 100000,
@@ -73,11 +79,42 @@ def save_business_rules():
     except Exception as e:
         print(f"⚠ Error guardando reglas: {e}")
 
+def add_simulation_to_session(simulation_data):
+    """Añade una simulación a la lista de la sesión (máximo 10)"""
+    global session_simulations
+    
+    # Preparar datos de la simulación
+    sim_record = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "nombre": simulation_data.get('nombre', 'N/A'),
+        "edad": simulation_data.get('edad', 0),
+        "score_crediticio": simulation_data.get('score_crediticio', 0),
+        "ingresos_mensuales": simulation_data.get('ingresos_mensuales', 0),
+        "antiguedad_laboral": simulation_data.get('antiguedad_laboral', 0),
+        "deudas_actuales": simulation_data.get('deudas_actuales', 0),
+        "monto_solicitado": simulation_data.get('monto_solicitado', 0) or 0,
+        "proposito": simulation_data.get('proposito', 'personal'),
+        "resultado": simulation_data.get('resultado', {}),
+        "aprobado": simulation_data.get('resultado', {}).get('aprobado', False),
+        "perfil": simulation_data.get('resultado', {}).get('perfil_riesgo', {}).get('perfil', 'RECHAZADO'),
+        "monto_aprobado": simulation_data.get('resultado', {}).get('oferta_credito', {}).get('monto_aprobado', 0) if simulation_data.get('resultado', {}).get('oferta_credito') else 0,
+        "tasa_anual": simulation_data.get('resultado', {}).get('oferta_credito', {}).get('tasa_anual', 0) if simulation_data.get('resultado', {}).get('oferta_credito') else 0,
+        "plazo_meses": simulation_data.get('resultado', {}).get('oferta_credito', {}).get('plazo_meses', 0) if simulation_data.get('resultado', {}).get('oferta_credito') else 0,
+        "pago_mensual": simulation_data.get('resultado', {}).get('oferta_credito', {}).get('pago_mensual', 0) if simulation_data.get('resultado', {}).get('oferta_credito') else 0,
+        "motivo_rechazo": simulation_data.get('resultado', {}).get('motivo_rechazo', '') if not simulation_data.get('resultado', {}).get('aprobado', False) else ''
+    }
+    
+    # Añadir al principio de la lista
+    session_simulations.insert(0, sim_record)
+    
+    # Mantener máximo 10 simulaciones
+    if len(session_simulations) > 10:
+        session_simulations = session_simulations[:10]
+
 def validate_rules(rules):
     """Valida la consistencia de las reglas de negocio"""
     validation_results = []
     
-    # Validar rangos básicos
     if rules['edad_minima'] < rules['edad_maxima']:
         validation_results.append("✓ Rango de edad válido")
     else:
@@ -88,7 +125,6 @@ def validate_rules(rules):
     else:
         validation_results.append("❌ Ratio deuda-ingreso inválido")
     
-    # Validar tasas por perfil
     for perfil, tasas in rules['tasas_por_perfil'].items():
         if tasas['min'] < tasas['max']:
             validation_results.append(f"✓ Tasas {perfil} válidas")
@@ -102,11 +138,11 @@ class CreditEvaluator:
         self.rules = business_rules
     
     def calculate_risk_profile(self, data):
-        """Calcula el perfil de riesgo basado en múltiples factores, con un score de 0 a 100"""
+        """Calcula el perfil de riesgo basado en múltiples factores"""
         score = 0
         factors = []
         
-        # Factor Score Crediticio (40% del peso) - CORREGIDO
+        # Factor Score Crediticio (40% del peso)
         score_credit = int(data.get('score_crediticio', 0))
         if score_credit >= 800:
             score += 40
@@ -145,18 +181,18 @@ class CreditEvaluator:
             score += 2
             factors.append("Ingresos bajos (<$15k)")
 
-        # Factor Antigüedad Laboral (15% del peso)
-        antiguedad = int(data.get('antiguedad_laboral', 0))
-        if antiguedad >= 60:
+        # Factor Antigüedad Laboral (15% del peso) - EN AÑOS
+        antiguedad_anos = int(data.get('antiguedad_laboral', 0))
+        if antiguedad_anos >= 5:
             score += 15
             factors.append("Antigüedad excelente (5+ años)")
-        elif antiguedad >= 36:
+        elif antiguedad_anos >= 3:
             score += 12
             factors.append("Antigüedad buena (3-5 años)")
-        elif antiguedad >= 24:
+        elif antiguedad_anos >= 2:
             score += 10
             factors.append("Antigüedad regular (2-3 años)")
-        elif antiguedad >= 12:
+        elif antiguedad_anos >= 1:
             score += 7
             factors.append("Antigüedad mínima (1-2 años)")
         else:
@@ -197,7 +233,7 @@ class CreditEvaluator:
             score += 1
             factors.append("Endeudamiento excesivo (>35%)")
         
-        # Determinar perfil basado en score total - CORREGIDO
+        # Determinar perfil basado en score total
         profile = "RECHAZADO"
         if score >= 85:
             profile = "AAA"
@@ -236,9 +272,10 @@ class CreditEvaluator:
         if ingresos < self.rules['ingresos_minimos']:
             errors.append(f"Ingresos insuficientes: ${ingresos:,.0f} < ${self.rules['ingresos_minimos']:,.0f}")
         
-        antiguedad = int(data.get('antiguedad_laboral', 0))
-        if antiguedad < self.rules['antiguedad_laboral_minima']:
-            errors.append(f"Antigüedad laboral insuficiente: {antiguedad} meses < {self.rules['antiguedad_laboral_minima']} meses")
+        # Validación en años
+        antiguedad_anos = int(data.get('antiguedad_laboral', 0))
+        if antiguedad_anos < self.rules['antiguedad_laboral_minima']:
+            errors.append(f"Antigüedad laboral insuficiente: {antiguedad_anos} años < {self.rules['antiguedad_laboral_minima']} años")
         
         deudas = float(data.get('deudas_actuales', 0))
         ratio_deuda = deudas / ingresos if ingresos > 0 else 1
@@ -261,10 +298,9 @@ class CreditEvaluator:
         if monto_solicitado and monto_solicitado <= monto_maximo:
             monto_ofrecido = monto_solicitado
         
-        # Calcular tasa basada en el score interno - CORREGIDO
+        # Calcular tasa basada en el score interno
         score_ratio = profile_data['score_total'] / 100
         tasa_range = tasa_info['max'] - tasa_info['min']
-        # A mayor score, menor tasa (tasa mínima + rango reducido por score)
         tasa_anual = tasa_info['max'] - (score_ratio * tasa_range)
         tasa_anual = max(tasa_info['min'], min(tasa_info['max'], tasa_anual))
         
@@ -334,6 +370,10 @@ class CreditEvaluator:
 load_business_rules()
 evaluator = CreditEvaluator()
 
+def check_admin_access():
+    """Verifica si el usuario tiene acceso al panel de administración"""
+    return session.get('admin_authenticated', False)
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
@@ -349,11 +389,18 @@ def index():
                 'score_crediticio': int(request.form.get('score_crediticio', 0)),
                 'ingresos_mensuales': float(request.form.get('ingresos_mensuales', 0)),
                 'deudas_actuales': float(request.form.get('deudas_actuales', 0)),
-                'antiguedad_laboral': int(request.form.get('antiguedad_laboral', 0)),
+                'antiguedad_laboral': int(request.form.get('antiguedad_laboral', 0)),  # EN AÑOS
                 'monto_solicitado': float(request.form.get('monto_solicitado', 0)) if request.form.get('monto_solicitado') else None,
                 'proposito': request.form.get('proposito', 'personal')
             }
+            
             resultado = evaluator.evaluate_credit_request(form_data)
+            
+            # Agregar simulación a la sesión
+            simulation_data = form_data.copy()
+            simulation_data['resultado'] = resultado
+            add_simulation_to_session(simulation_data)
+            
             return render_template_string(MAIN_TEMPLATE, resultado=resultado)
         except (ValueError, TypeError) as e:
             return render_template_string(MAIN_TEMPLATE, resultado={
@@ -362,8 +409,25 @@ def index():
             })
     return render_template_string(MAIN_TEMPLATE, resultado=None)
 
+@app.route('/admin_login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        access_key = request.form.get('access_key', '')
+        if access_key == ADMIN_ACCESS_KEY:
+            session['admin_authenticated'] = True
+            flash('Acceso autorizado al panel de administración', 'success')
+            return redirect(url_for('admin'))
+        else:
+            flash('Clave de acceso incorrecta', 'danger')
+    
+    return render_template_string(ADMIN_LOGIN_TEMPLATE)
+
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
+    if not check_admin_access():
+        flash('Acceso denegado. Ingrese la clave de acceso.', 'danger')
+        return redirect(url_for('admin_login'))
+    
     global business_rules, evaluator
     mensaje = None
     tipo_mensaje = 'info'
@@ -383,7 +447,7 @@ def admin():
                 business_rules['edad_minima'] = int(request.form.get('edad_minima', 18))
                 business_rules['edad_maxima'] = int(request.form.get('edad_maxima', 70))
                 business_rules['ingresos_minimos'] = int(request.form.get('ingresos_minimos', 15000))
-                business_rules['antiguedad_laboral_minima'] = int(request.form.get('antiguedad_laboral_minima', 12))
+                business_rules['antiguedad_laboral_minima'] = int(request.form.get('antiguedad_laboral_minima', 1))  # EN AÑOS
                 business_rules['ratio_deuda_ingreso_maximo'] = float(request.form.get('ratio_deuda_ingreso_maximo', 35)) / 100
                 
                 # Actualizar reglas por perfil
@@ -411,33 +475,86 @@ def admin():
                                 validate_rules=validate_rules,
                                 datetime=datetime)
 
+@app.route('/admin_logout')
+def admin_logout():
+    session.pop('admin_authenticated', None)
+    flash('Sesión de administración cerrada', 'info')
+    return redirect(url_for('index'))
+
 @app.route('/reports')
 def reports():
-    return render_template_string(REPORTS_TEMPLATE)
+    # Generar estadísticas de la sesión
+    total_simulations = len(session_simulations)
+    approved_count = len([s for s in session_simulations if s['aprobado']])
+    rejected_count = total_simulations - approved_count
+    
+    # Estadísticas por perfil
+    profile_stats = {}
+    approved_amount = 0
+    
+    for sim in session_simulations:
+        if sim['aprobado']:
+            approved_amount += sim['monto_aprobado']
+            perfil = sim['perfil']
+            if perfil in profile_stats:
+                profile_stats[perfil]['count'] += 1
+                profile_stats[perfil]['total_amount'] += sim['monto_aprobado']
+            else:
+                profile_stats[perfil] = {
+                    'count': 1, 
+                    'total_amount': sim['monto_aprobado'],
+                    'avg_rate': sim['tasa_anual']
+                }
+    
+    # Calcular promedios para perfiles
+    for perfil in profile_stats:
+        profile_stats[perfil]['avg_amount'] = profile_stats[perfil]['total_amount'] / profile_stats[perfil]['count']
+    
+    stats = {
+        'total_simulations': total_simulations,
+        'approved_count': approved_count,
+        'rejected_count': rejected_count,
+        'approval_rate': (approved_count / total_simulations * 100) if total_simulations > 0 else 0,
+        'total_approved_amount': approved_amount,
+        'avg_approved_amount': approved_amount / approved_count if approved_count > 0 else 0,
+        'profile_stats': profile_stats
+    }
+    
+    return render_template_string(REPORTS_TEMPLATE, 
+                                simulations=session_simulations,
+                                stats=stats,
+                                datetime=datetime)
+
+@app.route('/clear_session')
+def clear_session():
+    """Limpiar simulaciones de la sesión"""
+    global session_simulations
+    session_simulations = []
+    flash('Simulaciones de sesión limpiadas', 'info')
+    return redirect(url_for('reports'))
 
 @app.route('/api/test/<profile>')
 def test_profile(profile):
-    """Endpoint para probar perfiles específicos"""
     test_data = {
         'AAA': {
-            'nombre': 'Cliente AAA Test',
-            'edad': 35, 'score_crediticio': 820, 'ingresos_mensuales': 60000,
-            'deudas_actuales': 5000, 'antiguedad_laboral': 60, 'monto_solicitado': 150000
+            'nombre': 'Cliente AAA Test', 'edad': 35, 'score_crediticio': 820, 
+            'ingresos_mensuales': 60000, 'deudas_actuales': 5000, 
+            'antiguedad_laboral': 5, 'monto_solicitado': 150000  # EN AÑOS
         },
         'AA': {
-            'nombre': 'Cliente AA Test',
-            'edad': 40, 'score_crediticio': 780, 'ingresos_mensuales': 45000,
-            'deudas_actuales': 8000, 'antiguedad_laboral': 48, 'monto_solicitado': 120000
+            'nombre': 'Cliente AA Test', 'edad': 40, 'score_crediticio': 780, 
+            'ingresos_mensuales': 45000, 'deudas_actuales': 8000, 
+            'antiguedad_laboral': 4, 'monto_solicitado': 120000  # EN AÑOS
         },
         'A': {
-            'nombre': 'Cliente A Test',
-            'edad': 30, 'score_crediticio': 720, 'ingresos_mensuales': 30000,
-            'deudas_actuales': 6000, 'antiguedad_laboral': 36, 'monto_solicitado': 80000
+            'nombre': 'Cliente A Test', 'edad': 30, 'score_crediticio': 720, 
+            'ingresos_mensuales': 30000, 'deudas_actuales': 6000, 
+            'antiguedad_laboral': 3, 'monto_solicitado': 80000  # EN AÑOS
         },
         'REJECT': {
-            'nombre': 'Cliente Rechazado Test',
-            'edad': 22, 'score_crediticio': 580, 'ingresos_mensuales': 12000,
-            'deudas_actuales': 8000, 'antiguedad_laboral': 6, 'monto_solicitado': 50000
+            'nombre': 'Cliente Rechazado Test', 'edad': 22, 'score_crediticio': 580, 
+            'ingresos_mensuales': 12000, 'deudas_actuales': 8000, 
+            'antiguedad_laboral': 0, 'monto_solicitado': 50000  # EN AÑOS (menos de 1)
         }
     }
     
@@ -447,6 +564,11 @@ def test_profile(profile):
     data = test_data[profile.upper()]
     resultado = evaluator.evaluate_credit_request(data)
     
+    # Agregar a simulaciones de sesión
+    simulation_data = data.copy()
+    simulation_data['resultado'] = resultado
+    add_simulation_to_session(simulation_data)
+    
     return jsonify({
         'perfil_test': profile.upper(),
         'datos_entrada': data,
@@ -455,7 +577,6 @@ def test_profile(profile):
 
 @app.route('/api/rules')
 def get_rules():
-    """API para obtener las reglas actuales"""
     return jsonify(business_rules)
 
 @app.route('/api/evaluate', methods=['POST'])
@@ -472,6 +593,66 @@ def api_evaluate():
         return jsonify({'error': str(e)}), 500
 
 # ===== TEMPLATES HTML =====
+ADMIN_LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acceso Admin - Hotmart Credit</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .login-card { background: white; border-radius: 15px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); max-width: 400px; width: 100%; }
+        .login-header { text-align: center; margin-bottom: 30px; }
+        .login-header h1 { color: #667eea; margin-bottom: 10px; }
+        .login-header .subtitle { color: #666; font-size: 14px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; }
+        .form-group input { width: 100%; padding: 15px; border: 2px solid #e1e1e1; border-radius: 8px; font-size: 16px; text-align: center; letter-spacing: 2px; }
+        .form-group input:focus { outline: none; border-color: #667eea; }
+        .login-btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 15px; border-radius: 8px; font-size: 18px; font-weight: 600; cursor: pointer; width: 100%; margin-bottom: 20px; transition: all 0.3s ease; }
+        .login-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4); }
+        .back-link { text-align: center; }
+        .back-link a { color: #667eea; text-decoration: none; font-weight: 600; }
+        .alert { padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .key-hint { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; color: #1565c0; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="login-header">
+            <h1>🔐 Acceso Administrativo</h1>
+            <p class="subtitle">Panel de Configuración de Reglas de Negocio</p>
+        </div>
+        <div class="key-hint">
+            <strong>🔑 Clave de Acceso Requerida</strong><br>
+            Ingrese la clave para acceder al módulo administrativo
+        </div>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <form method="POST">
+            <div class="form-group">
+                <label for="access_key">Clave de Acceso</label>
+                <input type="password" id="access_key" name="access_key" placeholder="Ingrese clave" required>
+            </div>
+            <button type="submit" class="login-btn">🚀 Acceder al Panel</button>
+        </form>
+        <div class="back-link">
+            <a href="/">← Volver al Simulador</a>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
 MAIN_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
@@ -529,7 +710,7 @@ MAIN_TEMPLATE = '''
         </div>
         <div class="nav-buttons">
             <a href="/" class="nav-btn active">🏠 Evaluación</a>
-            <a href="/admin" class="nav-btn">⚙️ Administración</a>
+            <a href="/admin_login" class="nav-btn">⚙️ Administración</a>
             <a href="/reports" class="nav-btn">📊 Reportes</a>
         </div>
         <div class="form-card">
@@ -541,7 +722,7 @@ MAIN_TEMPLATE = '''
                     <div class="form-group"><label for="score_crediticio">Score Crediticio (300-850) *</label><input type="number" id="score_crediticio" name="score_crediticio" min="300" max="850" required></div>
                     <div class="form-group"><label for="ingresos_mensuales">Ingresos Mensuales ($) *</label><input type="number" id="ingresos_mensuales" name="ingresos_mensuales" min="0" step="0.01" required></div>
                     <div class="form-group"><label for="deudas_actuales">Deudas Actuales ($)</label><input type="number" id="deudas_actuales" name="deudas_actuales" min="0" step="0.01" value="0"></div>
-                    <div class="form-group"><label for="antiguedad_laboral">Antigüedad Laboral (meses) *</label><input type="number" id="antiguedad_laboral" name="antiguedad_laboral" min="0" required></div>
+                    <div class="form-group"><label for="antiguedad_laboral">Antigüedad Laboral (años) *</label><input type="number" id="antiguedad_laboral" name="antiguedad_laboral" min="0" max="50" required></div>
                     <div class="form-group"><label for="monto_solicitado">Monto Solicitado ($)</label><input type="number" id="monto_solicitado" name="monto_solicitado" min="1000" step="1000" placeholder="Opcional - se calculará automáticamente"></div>
                     <div class="form-group"><label for="proposito">Propósito del Crédito</label><select id="proposito" name="proposito"><option value="personal">Uso Personal</option><option value="auto">Compra de Vehículo</option><option value="vivienda">Mejoras al Hogar</option><option value="educacion">Educación</option><option value="negocio">Inversión en Negocio</option><option value="consolidacion">Consolidación de Deudas</option></select></div>
                 </div>
@@ -639,29 +820,50 @@ ADMIN_TEMPLATE = '''
         .profile-rules { background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 10px 0; }
         .profile-title { font-weight: bold; margin-bottom: 10px; color: #333; }
         .profile-inputs { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
-        .btn-primary { background: #667eea; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; }
+        .btn-primary { background: #667eea; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; transition: all 0.3s ease; }
         .btn-primary:hover { background: #5a67d8; }
-        .btn-secondary { background: #6c757d; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-left: 10px; }
+        .btn-secondary { background: #6c757d; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-left: 10px; transition: all 0.3s ease; }
         .btn-secondary:hover { background: #5a6268; }
+        .btn-logout { background: #dc3545; color: white; border: none; padding: 8px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-left: 10px; transition: all 0.3s ease; font-size: 14px; }
+        .btn-logout:hover { background: #c82333; }
         .alert { padding: 15px; border-radius: 5px; margin: 15px 0; }
         .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .alert-danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         @media (max-width: 768px) {
             .rules-grid { grid-template-columns: 1fr; }
             .profile-inputs { grid-template-columns: 1fr 1fr; }
+            .admin-header { flex-direction: column; gap: 15px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header"><h1>⚙️ Panel de Administración</h1><p>Configuración de Reglas de Negocio</p></div>
+        <div class="header">
+            <h1>⚙️ Panel de Administración</h1>
+            <p>Configuración de Reglas de Negocio - Acceso Autorizado</p>
+        </div>
         <div class="nav-buttons">
             <a href="/" class="nav-btn">🏠 Evaluación</a>
             <a href="/admin" class="nav-btn active">⚙️ Administración</a>
             <a href="/reports" class="nav-btn">📊 Reportes</a>
+            <a href="/admin_logout" class="nav-btn" style="background: rgba(220,53,69,0.8);">🚪 Cerrar Sesión</a>
         </div>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
         {% if mensaje %}<div class="alert alert-{{ tipo_mensaje }}">{{ mensaje }}</div>{% endif %}
         <div class="admin-card">
+            <div class="admin-header">
+                <h3>🔧 Configuración del Sistema</h3>
+                <div>
+                    <span style="color: #28a745; font-weight: bold;">✅ Sesión Administrativa Activa</span>
+                </div>
+            </div>
             <form method="POST">
                 <div class="admin-section">
                     <h3>📋 Requisitos Básicos</h3>
@@ -678,7 +880,7 @@ ADMIN_TEMPLATE = '''
                         <div class="rule-group">
                             <h4>Ingresos y Empleo</h4>
                             <div class="form-group"><label>Ingresos Mínimos ($)</label><input type="number" name="ingresos_minimos" value="{{ rules.ingresos_minimos }}" min="5000" step="1000"></div>
-                            <div class="form-group"><label>Antigüedad Laboral Mínima (meses)</label><input type="number" name="antiguedad_laboral_minima" value="{{ rules.antiguedad_laboral_minima }}" min="1" max="60"></div>
+                            <div class="form-group"><label>Antigüedad Laboral Mínima (años)</label><input type="number" name="antiguedad_laboral_minima" value="{{ rules.antiguedad_laboral_minima }}" min="1" max="10"></div>
                         </div>
                         <div class="rule-group">
                             <h4>Endeudamiento</h4>
@@ -714,6 +916,7 @@ ADMIN_TEMPLATE = '''
                     <p><strong>Fecha de última actualización:</strong> {{ datetime.now().strftime('%Y-%m-%d %H:%M:%S') }}</p>
                     <p><strong>Perfiles configurados:</strong> {{ rules.monto_maximo_por_perfil.keys()|list|length }}</p>
                     <p><strong>Score mínimo:</strong> {{ rules.score_minimo }}</p>
+                    <p><strong>Antigüedad mínima:</strong> {{ rules.antiguedad_laboral_minima }} años</p>
                     <p><strong>Monto máximo general:</strong> ${{ "{:,}".format(rules.monto_maximo_por_perfil.AAA) }}</p>
                 </div>
                 <div class="rule-group">
@@ -736,62 +939,291 @@ REPORTS_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reportes - Hotmart Credit</title>
+    <title>Dashboard de Reportes - Hotmart Credit</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
         .header { text-align: center; color: white; margin-bottom: 30px; }
         .header h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
         .nav-buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
         .nav-btn { padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); transition: all 0.3s ease; font-weight: 600; }
         .nav-btn:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
         .nav-btn.active { background: rgba(255,255,255,0.9); color: #667eea; }
-        .card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); text-align: center; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: white; border-radius: 15px; padding: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); text-align: center; }
+        .stat-number { font-size: 2.5rem; font-weight: bold; margin-bottom: 10px; }
+        .stat-label { color: #666; font-weight: 600; }
+        .approval-rate { color: #28a745; }
+        .rejection-rate { color: #dc3545; }
+        .total-amount { color: #667eea; }
+        .avg-amount { color: #fd7e14; }
+        .report-card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); margin-bottom: 30px; }
+        .section-title { color: #333; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #667eea; display: flex; justify-content: space-between; align-items: center; }
+        .simulations-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .simulations-table th, .simulations-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        .simulations-table th { background: #f8f9fa; font-weight: 600; }
+        .status-approved { color: #28a745; font-weight: bold; }
+        .status-rejected { color: #dc3545; font-weight: bold; }
+        .profile-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-weight: bold; font-size: 11px; text-transform: uppercase; }
+        .profile-AAA { background: #28a745; color: white; }
+        .profile-AA { background: #17a2b8; color: white; }
+        .profile-A { background: #007bff; color: white; }
+        .profile-BBB { background: #ffc107; color: black; }
+        .profile-BB { background: #fd7e14; color: white; }
+        .profile-B { background: #dc3545; color: white; }
+        .profile-RECHAZADO { background: #6c757d; color: white; }
+        .profile-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .profile-stat { background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center; }
+        .no-data { text-align: center; color: #666; padding: 40px; font-style: italic; }
+        .btn-action { padding: 10px 20px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 0 5px; font-weight: 600; transition: all 0.3s ease; }
+        .btn-action:hover { background: #5a67d8; }
+        .btn-clear { background: #dc3545; }
+        .btn-clear:hover { background: #c82333; }
+        .btn-print { background: #28a745; }
+        .btn-print:hover { background: #218838; }
+        .executive-summary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; border-radius: 15px; margin-bottom: 30px; }
+        .executive-summary h3 { margin-bottom: 15px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+        .summary-item { text-align: center; }
+        .summary-value { font-size: 1.8rem; font-weight: bold; margin-bottom: 5px; }
+        .summary-label { opacity: 0.9; font-size: 0.9rem; }
+        @media (max-width: 768px) {
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .simulations-table { font-size: 14px; }
+            .simulations-table th, .simulations-table td { padding: 8px; }
+            .nav-buttons { flex-wrap: wrap; }
+        }
+        @media print {
+            body { background: white; }
+            .nav-buttons, .btn-action { display: none; }
+            .container { max-width: 100%; }
+            .header { color: black; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header"><h1>📊 Reportes</h1><p>Análisis y Estadísticas del Sistema</p></div>
+        <div class="header">
+            <h1>📊 Dashboard de Reportes</h1>
+            <p>Análisis y Estadísticas del Sistema de Evaluación Crediticia</p>
+        </div>
         <div class="nav-buttons">
             <a href="/" class="nav-btn">🏠 Evaluación</a>
-            <a href="/admin" class="nav-btn">⚙️ Administración</a>
+            <a href="/admin_login" class="nav-btn">⚙️ Administración</a>
             <a href="/reports" class="nav-btn active">📊 Reportes</a>
         </div>
-        <div class="card">
-            <h2>🚧 Módulo en Desarrollo</h2>
-            <p>Esta sección contendrá reportes detallados sobre:</p>
-            <ul style="text-align: left; max-width: 500px; margin: 20px auto;">
-                <li>📈 Estadísticas de aprobación por perfil</li>
-                <li>💰 Análisis de montos otorgados</li>
-                <li>⚠️ Factores de rechazo más comunes</li>
-                <li>📊 Tendencias de evaluación</li>
-                <li>🎯 Performance del sistema</li>
-            </ul>
-            <p style="margin-top: 20px;"><em>Próximamente disponible...</em></p>
+
+        {% if stats.total_simulations > 0 %}
+        <!-- Resumen Ejecutivo -->
+        <div class="executive-summary">
+            <h3>📈 Resumen Ejecutivo de Simulaciones</h3>
+            <div class="summary-grid">
+                <div class="summary-item">
+                    <div class="summary-value">{{ stats.total_simulations }}</div>
+                    <div class="summary-label">Total Simulaciones</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{{ "%.1f"|format(stats.approval_rate) }}%</div>
+                    <div class="summary-label">Tasa de Aprobación</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">${{ "{:,.0f}".format(stats.total_approved_amount) }}</div>
+                    <div class="summary-label">Monto Total Aprobado</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">${{ "{:,.0f}".format(stats.avg_approved_amount) }}</div>
+                    <div class="summary-label">Promedio por Crédito</div>
+                </div>
+            </div>
         </div>
+
+        <!-- KPIs Principales -->
+        <div class="dashboard-grid">
+            <div class="stat-card">
+                <div class="stat-number approval-rate">{{ stats.approved_count }}</div>
+                <div class="stat-label">Créditos Aprobados</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number rejection-rate">{{ stats.rejected_count }}</div>
+                <div class="stat-label">Créditos Rechazados</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number total-amount">${{ "{:,.0f}".format(stats.total_approved_amount) }}</div>
+                <div class="stat-label">Monto Total Aprobado</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number avg-amount">${{ "{:,.0f}".format(stats.avg_approved_amount) }}</div>
+                <div class="stat-label">Promedio por Aprobación</div>
+            </div>
+        </div>
+
+        <!-- Estadísticas por Perfil -->
+        {% if stats.profile_stats %}
+        <div class="report-card">
+            <h3 class="section-title">📊 Distribución por Perfil de Riesgo</h3>
+            <div class="profile-stats">
+                {% for perfil, data in stats.profile_stats.items() %}
+                <div class="profile-stat">
+                    <h4><span class="profile-badge profile-{{ perfil }}">{{ perfil }}</span></h4>
+                    <p><strong>{{ data.count }}</strong> aprobaciones</p>
+                    <p><strong>${{ "{:,.0f}".format(data.total_amount) }}</strong> total</p>
+                    <p><strong>${{ "{:,.0f}".format(data.avg_amount) }}</strong> promedio</p>
+                    <p><strong>{{ "%.1f"|format(data.avg_rate) }}%</strong> tasa promedio</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Detalle de Simulaciones -->
+        <div class="report-card">
+            <h3 class="section-title">
+                📋 Registro de Simulaciones (Últimas {{ simulations|length }})
+                <div>
+                    <a href="javascript:window.print()" class="btn-action btn-print">🖨️ Imprimir</a>
+                    <a href="/clear_session" class="btn-action btn-clear" onclick="return confirm('¿Está seguro de limpiar todas las simulaciones?')">🗑️ Limpiar</a>
+                </div>
+            </h3>
+            <div style="overflow-x: auto;">
+                <table class="simulations-table">
+                    <thead>
+                        <tr>
+                            <th>Fecha/Hora</th>
+                            <th>Cliente</th>
+                            <th>Edad</th>
+                            <th>Score</th>
+                            <th>Ingresos</th>
+                            <th>Antigüedad</th>
+                            <th>Resultado</th>
+                            <th>Perfil</th>
+                            <th>Monto Aprobado</th>
+                            <th>Tasa</th>
+                            <th>Motivo Rechazo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for sim in simulations %}
+                        <tr>
+                            <td>{{ sim.timestamp }}</td>
+                            <td>{{ sim.nombre }}</td>
+                            <td>{{ sim.edad }}</td>
+                            <td>{{ sim.score_crediticio }}</td>
+                            <td>${{ "{:,.0f}".format(sim.ingresos_mensuales) }}</td>
+                            <td>{{ sim.antiguedad_laboral }} años</td>
+                            <td class="{% if sim.aprobado %}status-approved{% else %}status-rejected{% endif %}">
+                                {% if sim.aprobado %}✅ APROBADO{% else %}❌ RECHAZADO{% endif %}
+                            </td>
+                            <td><span class="profile-badge profile-{{ sim.perfil }}">{{ sim.perfil }}</span></td>
+                            <td>{% if sim.monto_aprobado > 0 %} ${{ "{:,.0f}".format(sim.monto_aprobado) }}{% else %}-{% endif %}</td>
+                            <td>{% if sim.tasa_anual > 0 %}{{ "%.1f"|format(sim.tasa_anual) }}%{% else %}-{% endif %}</td>
+                            <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">{{ sim.motivo_rechazo[:50] }}{% if sim.motivo_rechazo|length > 50 %}...{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Análisis de Riesgos -->
+        <div class="report-card">
+            <h3 class="section-title">⚠️ Análisis de Factores de Rechazo</h3>
+            {% set rejected_sims = simulations | selectattr('aprobado', 'equalto', false) | list %}
+            {% if rejected_sims %}
+            <div class="profile-stats">
+                <div class="profile-stat">
+                    <h4>Total Rechazos</h4>
+                    <p><strong>{{ rejected_sims|length }}</strong> de {{ simulations|length }}</p>
+                    <p><strong>{{ "%.1f"|format((rejected_sims|length / simulations|length * 100) if simulations|length > 0 else 0) }}%</strong> de tasa de rechazo</p>
+                </div>
+                {% set score_rejects = rejected_sims | selectattr('score_crediticio', 'lt', 650) | list %}
+                <div class="profile-stat">
+                    <h4>Score Bajo</h4>
+                    <p><strong>{{ score_rejects|length }}</strong> rechazos</p>
+                    <p>Score < 650</p>
+                </div>
+                {% set income_rejects = rejected_sims | selectattr('ingresos_mensuales', 'lt', 15000) | list %}
+                <div class="profile-stat">
+                    <h4>Ingresos Bajos</h4>
+                    <p><strong>{{ income_rejects|length }}</strong> rechazos</p>
+                    <p>Ingresos < $15,000</p>
+                </div>
+                {% set exp_rejects = rejected_sims | selectattr('antiguedad_laboral', 'lt', 1) | list %}
+                <div class="profile-stat">
+                    <h4>Poca Experiencia</h4>
+                    <p><strong>{{ exp_rejects|length }}</strong> rechazos</p>
+                    <p>Antigüedad < 1 año</p>
+                </div>
+            </div>
+            {% else %}
+            <p class="no-data">No hay rechazos registrados en la sesión actual.</p>
+            {% endif %}
+        </div>
+
+        <!-- Footer del Reporte -->
+        <div class="report-card">
+            <h3 class="section-title">📝 Información del Reporte</h3>
+            <div class="profile-stats">
+                <div class="profile-stat">
+                    <h4>Generado</h4>
+                    <p>{{ datetime.now().strftime('%Y-%m-%d %H:%M:%S') }}</p>
+                </div>
+                <div class="profile-stat">
+                    <h4>Sistema</h4>
+                    <p>Hotmart Credit Simulator v2.0</p>
+                </div>
+                <div class="profile-stat">
+                    <h4>Alcance</h4>
+                    <p>Simulaciones de Sesión (Máx. 10)</p>
+                </div>
+                <div class="profile-stat">
+                    <h4>Uso</h4>
+                    <p>Evaluación del Módulo de Curso</p>
+                </div>
+            </div>
+        </div>
+
+        {% else %}
+        <!-- Sin Datos -->
+        <div class="report-card">
+            <div class="no-data">
+                <h3>📊 No hay simulaciones registradas</h3>
+                <p>Realice algunas evaluaciones de crédito para ver el dashboard de reportes.</p>
+                <a href="/" class="btn-action" style="margin-top: 20px;">🏠 Ir a Evaluaciones</a>
+            </div>
+        </div>
+        {% endif %}
     </div>
 </body>
 </html>
 '''
 
 if __name__ == '__main__':
-    print("🚀 Iniciando Simulador de Crédito Hotmart")
-    print("📊 Sistema de Evaluación Crediticia Integral")
-    print("=" * 50)
+    print("🚀 Iniciando Simulador de Crédito Hotmart - Versión Completa")
+    print("📊 Sistema de Evaluación Crediticia con Dashboard de Reportes")
+    print("🔐 Panel de Administración Protegido con Clave RAG123")
+    print("=" * 60)
     
     load_business_rules()
     print(f"✅ Reglas de negocio cargadas")
     print(f"📋 Score mínimo: {business_rules['score_minimo']}")
     print(f"💰 Monto máximo AAA: ${business_rules['monto_maximo_por_perfil']['AAA']:,}")
     print(f"⚡ Ratio deuda máximo: {business_rules['ratio_deuda_ingreso_maximo']:.0%}")
+    print(f"👔 Antigüedad mínima: {business_rules['antiguedad_laboral_minima']} años")
     
     print("\n🌐 Acceso al sistema:")
     print("   • Evaluación: http://localhost:5000/")
-    print("   • Administración: http://localhost:5000/admin")
-    print("   • Reportes: http://localhost:5000/reports")
+    print("   • Administración: http://localhost:5000/admin_login (Clave: RAG123)")
+    print("   • Dashboard Reportes: http://localhost:5000/reports")
     print("   • API Test AAA: http://localhost:5000/api/test/aaa")
     print("   • API Reglas: http://localhost:5000/api/rules")
-    print("=" * 50)
+    print("\n🎯 Características principales:")
+    print("   ✓ Autenticación administrativa segura")
+    print("   ✓ Antigüedad laboral en años (no meses)")
+    print("   ✓ Dashboard completo con estadísticas")
+    print("   ✓ Registro de máximo 10 simulaciones por sesión")
+    print("   ✓ Reporte ejecutivo para evaluación del módulo")
+    print("   ✓ Funcionalidad de impresión para reportes")
+    print("=" * 60)
     
     app.run(debug=True, host='0.0.0.0', port=5000)
