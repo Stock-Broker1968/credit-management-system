@@ -1,1385 +1,797 @@
 #!/usr/bin/env python3
 """
 Simulador Completo de Gestión de Crédito - Hotmart
-Con Panel de Administración para Reglas de Negocio V2.0
+Con Panel de Administración para Reglas de Negocio
+Versión Optimizada Corregida - Todos los Problemas Solucionados
 """
 
 import os
 import json
-import math
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'simulador-credito-hotmart-2024')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'hotmart_credit_sim_secret_key')
 
-# Reglas de negocio iniciales (calibradas para ser más permisivas)
-REGLAS_NEGOCIO = {
-    'SCORE_MINIMO_APROBACION': 200,
-    'INGRESO_MINIMO': 8000,
-    'MONTO_MAXIMO_CREDITO': 200000,
-    'PLAZOS_AUTORIZADOS': [3, 6, 9, 12, 18, 24],
-    'TASA_MINIMA': 0.20,
-    'TASA_MAXIMA': 0.50,
-    'TDSR_MAXIMO': 0.55,
-    'FICO_MINIMO_APROBACION': 450,
-    'FACTOR_SCORING': 1.5,
-    'BONUS_JOVEN': 25,
-    'BONUS_UNIVERSIDAD': 20
+# Configuración de reglas de negocio por defecto
+DEFAULT_RULES = {
+    "score_minimo": 650,
+    "edad_minima": 18,
+    "edad_maxima": 70,
+    "ingresos_minimos": 15000,
+    "antiguedad_laboral_minima": 12,  # en meses
+    "ratio_deuda_ingreso_maximo": 0.35,
+    "monto_maximo_por_perfil": {
+        "AAA": 200000, "AA": 150000, "A": 100000,
+        "BBB": 75000, "BB": 50000, "B": 25000
+    },
+    "tasas_por_perfil": {
+        "AAA": {"min": 8.5, "max": 12.0}, "AA": {"min": 12.0, "max": 15.0},
+        "A": {"min": 15.0, "max": 18.0}, "BBB": {"min": 18.0, "max": 22.0},
+        "BB": {"min": 22.0, "max": 28.0}, "B": {"min": 28.0, "max": 35.0}
+    },
+    "plazos_por_perfil": {
+        "AAA": {"min": 12, "max": 60}, "AA": {"min": 12, "max": 48},
+        "A": {"min": 12, "max": 36}, "BBB": {"min": 12, "max": 24},
+        "BB": {"min": 6, "max": 18}, "B": {"min": 6, "max": 12}
+    }
 }
 
-class ModeloScoringCrediticio:
-    """Modelo de scoring crediticio integrado con reglas ajustables"""
+business_rules = DEFAULT_RULES.copy()
+
+def load_business_rules():
+    """Carga las reglas de negocio desde archivo o usa las por defecto"""
+    global business_rules
+    rules_file = 'business_rules.json'
     
+    if os.path.exists(rules_file):
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                loaded_rules = json.load(f)
+                business_rules = DEFAULT_RULES.copy()
+                for key, value in loaded_rules.items():
+                    if key in business_rules:
+                        if isinstance(business_rules[key], dict):
+                            business_rules[key].update(value)
+                        else:
+                            business_rules[key] = value
+            print("✓ Reglas de negocio cargadas desde archivo")
+        except Exception as e:
+            print(f"⚠ Error cargando reglas: {e}. Usando reglas por defecto.")
+            business_rules = DEFAULT_RULES.copy()
+    else:
+        business_rules = DEFAULT_RULES.copy()
+        save_business_rules()
+
+def save_business_rules():
+    """Guarda las reglas de negocio en archivo"""
+    rules_file = 'business_rules.json'
+    try:
+        with open(rules_file, 'w', encoding='utf-8') as f:
+            json.dump(business_rules, f, indent=2, ensure_ascii=False)
+        print("✓ Reglas de negocio guardadas")
+    except Exception as e:
+        print(f"⚠ Error guardando reglas: {e}")
+
+def validate_rules(rules):
+    """Valida la consistencia de las reglas de negocio"""
+    validation_results = []
+    
+    # Validar rangos básicos
+    if rules['edad_minima'] < rules['edad_maxima']:
+        validation_results.append("✓ Rango de edad válido")
+    else:
+        validation_results.append("❌ Rango de edad inválido")
+    
+    if 0 < rules['ratio_deuda_ingreso_maximo'] <= 1:
+        validation_results.append("✓ Ratio deuda-ingreso válido")
+    else:
+        validation_results.append("❌ Ratio deuda-ingreso inválido")
+    
+    # Validar tasas por perfil
+    for perfil, tasas in rules['tasas_por_perfil'].items():
+        if tasas['min'] < tasas['max']:
+            validation_results.append(f"✓ Tasas {perfil} válidas")
+        else:
+            validation_results.append(f"❌ Tasas {perfil} inválidas")
+    
+    return validation_results
+
+class CreditEvaluator:
     def __init__(self):
-        self.reglas = REGLAS_NEGOCIO.copy()
+        self.rules = business_rules
     
-    def actualizar_reglas(self, nuevas_reglas):
-        self.reglas.update(nuevas_reglas)
-    
-    def calcular_variables_generales(self, datos):
-        puntos = 0
-        detalles = []
-        bonificaciones = []
-        puntos_max_categoria = 180
+    def calculate_risk_profile(self, data):
+        """Calcula el perfil de riesgo basado en múltiples factores, con un score de 0 a 100"""
+        score = 0
+        factors = []
         
-        antiguedad_domicilio = float(datos.get('antiguedad_domicilio', 0))
-        puntos_domicilio = 30 if antiguedad_domicilio >= 6 else 25 if antiguedad_domicilio >= 3 else 15 if antiguedad_domicilio >= 1 else 5
-        puntos += puntos_domicilio
-        detalles.append({'factor': 'Antigüedad en Domicilio', 'valor': f"{antiguedad_domicilio} años", 'puntos': puntos_domicilio, 'maximo': 30})
-        
-        estado_civil = datos.get('estado_civil', 'soltero')
-        puntos_civil = 20 if estado_civil == 'casado' else 15
-        puntos += puntos_civil
-        detalles.append({'factor': 'Estado Civil', 'valor': estado_civil.replace('_', ' ').title(), 'puntos': puntos_civil, 'maximo': 20})
-        
-        dependientes = int(datos.get('dependientes', 0))
-        puntos_dep = 15 if dependientes <= 2 else 10
-        puntos += puntos_dep
-        detalles.append({'factor': 'Dependientes', 'valor': str(dependientes), 'puntos': puntos_dep, 'maximo': 15})
-        
-        nivel_estudios = datos.get('nivel_estudios', 'secundaria')
-        estudios_puntos = {'universidad': 20, 'preparatoria': 17, 'secundaria': 14, 'primaria': 10}
-        puntos_estudios = estudios_puntos.get(nivel_estudios, 10)
-        puntos += puntos_estudios
-        detalles.append({'factor': 'Nivel de Estudios', 'valor': nivel_estudios.title(), 'puntos': puntos_estudios, 'maximo': 20})
-        if nivel_estudios == 'universidad':
-            puntos += self.reglas['BONUS_UNIVERSIDAD']
-            bonificaciones.append(f"Educación superior (+{self.reglas['BONUS_UNIVERSIDAD']} pts)")
-        
-        ocupacion = datos.get('ocupacion', 'empleado_privado')
-        ocupacion_puntos = {'empleado_publico': 25, 'empleado_privado': 22, 'independiente': 18, 'comerciante': 15}
-        puntos_ocupacion = ocupacion_puntos.get(ocupacion, 15)
-        puntos += puntos_ocupacion
-        detalles.append({'factor': 'Ocupación', 'valor': ocupacion.replace('_', ' ').title(), 'puntos': puntos_ocupacion, 'maximo': 25})
-        
-        antiguedad_empleo = float(datos.get('antiguedad_empleo', 0))
-        puntos_emp = 20 if antiguedad_empleo >= 3 else 16 if antiguedad_empleo >= 1 else 10
-        puntos += puntos_emp
-        detalles.append({'factor': 'Antigüedad en Empleo', 'valor': f"{antiguedad_empleo} años", 'puntos': puntos_emp, 'maximo': 20})
-        
-        edad = int(datos.get('edad', 25))
-        puntos_edad = 30 if edad > 45 else 28 if edad >= 35 else 25 if edad >= 25 else 20
-        puntos += puntos_edad
-        detalles.append({'factor': 'Edad', 'valor': f"{edad} años", 'puntos': puntos_edad, 'maximo': 30})
-        if 22 <= edad <= 30:
-            puntos += self.reglas['BONUS_JOVEN']
-            bonificaciones.append(f"Perfil joven (+{self.reglas['BONUS_JOVEN']} pts)")
-            
-        comprobante_domicilio = datos.get('comprobante_domicilio') == 'si'
-        comprobante_ingresos = datos.get('comprobante_ingresos') == 'si'
-        puntos_validaciones = 20 if comprobante_domicilio and comprobante_ingresos else 15 if comprobante_domicilio or comprobante_ingresos else 8
-        puntos += puntos_validaciones
-        detalles.append({'factor': 'Validaciones Documentales', 'valor': f"Domicilio: {'Sí' if comprobante_domicilio else 'No'}, Ingresos: {'Sí' if comprobante_ingresos else 'No'}", 'puntos': puntos_validaciones, 'maximo': 20})
-        
-        puntos_finales = int(puntos * self.reglas['FACTOR_SCORING'])
-        puntos_finales = min(puntos_finales, puntos_max_categoria)
-        
-        return {
-            'categoria': 'Variables Generales',
-            'puntos_obtenidos': puntos_finales,
-            'puntos_maximos': puntos_max_categoria,
-            'peso': 0.30,
-            'puntos_ponderados': puntos_finales * 0.30,
-            'detalles': detalles,
-            'bonificaciones': bonificaciones
-        }
-
-    def calcular_historial_crediticio(self, datos):
-        puntos = 0
-        detalles = []
-        puntos_max_categoria = 130
-        
-        ultima_calificacion = int(datos.get('ultima_calificacion', 2))
-        puntos_calif = 50 if ultima_calificacion == 1 else 40 if ultima_calificacion == 2 else 25 if ultima_calificacion == 3 else 15
-        puntos += puntos_calif
-        detalles.append({'factor': 'Última Calificación', 'valor': str(ultima_calificacion), 'puntos': puntos_calif, 'maximo': 50})
-        
-        num_consultas = int(datos.get('numero_consultas', 0))
-        puntos_consultas = 30 if num_consultas <= 5 else 25 if num_consultas <= 10 else 20 if num_consultas <= 15 else 15
-        puntos += puntos_consultas
-        detalles.append({'factor': 'Número de Consultas', 'valor': str(num_consultas), 'puntos': puntos_consultas, 'maximo': 30})
-        
-        fico_score = int(datos.get('fico_score', 650))
-        puntos_fico = 50 if fico_score >= 750 else 45 if fico_score >= 700 else 38 if fico_score >= 650 else 30 if fico_score >= 600 else 25 if fico_score >= 550 else 18
-        puntos += puntos_fico
-        detalles.append({'factor': 'FICO Score', 'valor': str(fico_score), 'puntos': puntos_fico, 'maximo': 50})
-        
-        puntos_finales = int(puntos * self.reglas['FACTOR_SCORING'])
-        puntos_finales = min(puntos_finales, puntos_max_categoria)
-        
-        return {
-            'categoria': 'Historial Crediticio',
-            'puntos_obtenidos': puntos_finales,
-            'puntos_maximos': puntos_max_categoria,
-            'peso': 0.30,
-            'puntos_ponderados': puntos_finales * 0.30,
-            'detalles': detalles
-        }
-    
-    def calcular_capacidad_pago(self, datos):
-        puntos = 0
-        detalles = []
-        puntos_max_categoria = 90
-        ingresos_mensuales = float(datos.get('ingresos_mensuales', self.reglas['INGRESO_MINIMO']))
-        deuda_mensual = float(datos.get('deuda_mensual', 0))
-        tdsr = deuda_mensual / ingresos_mensuales if ingresos_mensuales > 0 else 0
-        
-        tipo_comprobante = datos.get('tipo_comprobante', 'otros')
-        puntos_comprobante = 35 if tipo_comprobante in ['nomina', 'estados_cuenta'] else 30 if tipo_comprobante == 'declaracion' else 20
-        puntos += puntos_comprobante
-        detalles.append({'factor': 'Tipo de Comprobante', 'valor': tipo_comprobante.replace('_', ' ').title(), 'puntos': puntos_comprobante, 'maximo': 35})
-        
-        ocupacion = datos.get('ocupacion', 'empleado_privado')
-        puntos_estabilidad = 25 if ocupacion == 'empleado_publico' else 22 if ocupacion == 'empleado_privado' else 18
-        puntos += puntos_estabilidad
-        detalles.append({'factor': 'Estabilidad de Ingresos', 'valor': ocupacion.replace('_', ' ').title(), 'puntos': puntos_estabilidad, 'maximo': 25})
-        
-        puntos_tdsr = 30 if tdsr < 0.25 else 28 if tdsr <= 0.35 else 25 if tdsr <= 0.45 else 15
-        puntos += puntos_tdsr
-        detalles.append({'factor': 'TDSR (Ratio Deuda-Ingreso)', 'valor': f"{tdsr:.1%}", 'puntos': puntos_tdsr, 'maximo': 30})
-        
-        puntos_finales = int(puntos * self.reglas['FACTOR_SCORING'])
-        puntos_finales = min(puntos_finales, puntos_max_categoria)
-        
-        return {
-            'categoria': 'Capacidad de Pago',
-            'puntos_obtenidos': puntos_finales,
-            'puntos_maximos': puntos_max_categoria,
-            'peso': 0.40,
-            'puntos_ponderados': puntos_finales * 0.40,
-            'detalles': detalles,
-            'tdsr': tdsr
-        }
-    
-    def calcular_condiciones_credito(self, score_final, ingresos_mensuales, tdsr):
-        if score_final >= 350:
-            factor_monto = 4.5 # Monto máximo más alto para perfiles excelentes
-        elif score_final >= 300:
-            factor_monto = 3.5
-        elif score_final >= 250:
-            factor_monto = 3.0
+        # Factor Score Crediticio (40% del peso) - CORREGIDO
+        score_credit = int(data.get('score_crediticio', 0))
+        if score_credit >= 800:
+            score += 40
+            factors.append("Score excelente (800+)")
+        elif score_credit >= 750:
+            score += 35
+            factors.append("Score muy bueno (750-799)")
+        elif score_credit >= 700:
+            score += 30
+            factors.append("Score bueno (700-749)")
+        elif score_credit >= 650:
+            score += 20
+            factors.append("Score regular (650-699)")
+        elif score_credit >= 600:
+            score += 10
+            factors.append("Score bajo (600-649)")
         else:
-            factor_monto = 2.5
+            score += 5
+            factors.append("Score muy bajo (<600)")
         
-        monto_calculado = ingresos_mensuales * factor_monto * (1 - min(tdsr, self.reglas['TDSR_MAXIMO']))
-        monto_final = min(monto_calculado, self.reglas['MONTO_MAXIMO_CREDITO'])
-        monto_final = max(monto_final, 10000)
-        
-        tasa = self.reglas['TASA_MINIMA'] + (self.reglas['TASA_MAXIMA'] - self.reglas['TASA_MINIMA']) * (1 - (score_final - 200) / (450 - 200))
-        tasa = max(self.reglas['TASA_MINIMA'], min(tasa, self.reglas['TASA_MAXIMA']))
-        
-        opciones_plazo = []
-        for plazo in sorted(self.reglas['PLAZOS_AUTORIZADOS']):
-            tasa_mensual = tasa / 12
-            if tasa_mensual > 0:
-                pago_mensual = monto_final * (tasa_mensual * (1 + tasa_mensual)**plazo) / ((1 + tasa_mensual)**plazo - 1)
-            else:
-                pago_mensual = monto_final / plazo
-            
-            porcentaje_ingreso = (pago_mensual / ingresos_mensuales)
-            
-            recomendacion = 'No Factible'
-            if porcentaje_ingreso <= 0.25:
-                recomendacion = 'Excelente'
-            elif porcentaje_ingreso <= 0.35:
-                recomendacion = 'Buena'
-            elif porcentaje_ingreso <= self.reglas['TDSR_MAXIMO']:
-                recomendacion = 'Regular'
+        # Factor Ingresos (25% del peso)
+        ingresos = float(data.get('ingresos_mensuales', 0))
+        if ingresos >= 50000:
+            score += 25
+            factors.append("Ingresos altos ($50k+)")
+        elif ingresos >= 30000:
+            score += 20
+            factors.append("Ingresos buenos ($30k-$50k)")
+        elif ingresos >= 20000:
+            score += 15
+            factors.append("Ingresos medios ($20k-$30k)")
+        elif ingresos >= 15000:
+            score += 10
+            factors.append("Ingresos básicos ($15k-$20k)")
+        else:
+            score += 2
+            factors.append("Ingresos bajos (<$15k)")
 
-            opciones_plazo.append({
-                'plazo': plazo,
-                'pago_mensual': round(pago_mensual, 2),
-                'porcentaje_ingreso': round(porcentaje_ingreso * 100, 1),
-                'factible': pago_mensual <= (ingresos_mensuales * self.reglas['TDSR_MAXIMO']),
-                'recomendacion': recomendacion
-            })
+        # Factor Antigüedad Laboral (15% del peso)
+        antiguedad = int(data.get('antiguedad_laboral', 0))
+        if antiguedad >= 60:
+            score += 15
+            factors.append("Antigüedad excelente (5+ años)")
+        elif antiguedad >= 36:
+            score += 12
+            factors.append("Antigüedad buena (3-5 años)")
+        elif antiguedad >= 24:
+            score += 10
+            factors.append("Antigüedad regular (2-3 años)")
+        elif antiguedad >= 12:
+            score += 7
+            factors.append("Antigüedad mínima (1-2 años)")
+        else:
+            score += 2
+            factors.append("Antigüedad insuficiente (<1 año)")
+
+        # Factor Edad (10% del peso)
+        edad = int(data.get('edad', 0))
+        if 35 <= edad <= 50:
+            score += 10
+            factors.append("Edad óptima (35-50)")
+        elif 25 <= edad < 35 or 50 < edad <= 60:
+            score += 8
+            factors.append("Edad favorable")
+        elif 18 <= edad < 25 or 60 < edad <= 65:
+            score += 5
+            factors.append("Edad aceptable")
+        else:
+            score += 1
+            factors.append("Edad de riesgo")
+
+        # Factor Ratio Deuda-Ingreso (10% del peso)
+        deudas = float(data.get('deudas_actuales', 0))
+        ratio_deuda = deudas / ingresos if ingresos > 0 else 1
+        if ratio_deuda <= 0.10:
+            score += 10
+            factors.append("Endeudamiento muy bajo (<10%)")
+        elif ratio_deuda <= 0.20:
+            score += 8
+            factors.append("Endeudamiento bajo (10-20%)")
+        elif ratio_deuda <= 0.30:
+            score += 6
+            factors.append("Endeudamiento moderado (20-30%)")
+        elif ratio_deuda <= 0.35:
+            score += 3
+            factors.append("Endeudamiento alto (30-35%)")
+        else:
+            score += 1
+            factors.append("Endeudamiento excesivo (>35%)")
+        
+        # Determinar perfil basado en score total - CORREGIDO
+        profile = "RECHAZADO"
+        if score >= 85:
+            profile = "AAA"
+        elif score >= 75:
+            profile = "AA"
+        elif score >= 65:
+            profile = "A"
+        elif score >= 55:
+            profile = "BBB"
+        elif score >= 45:
+            profile = "BB"
+        elif score >= 35:
+            profile = "B"
         
         return {
-            'monto_aprobado': round(monto_final, -2),
-            'tasa_anual': tasa,
-            'opciones_plazo': opciones_plazo
+            "perfil": profile,
+            "score_total": round(score, 2),
+            "factores": factors,
+            "ratio_deuda_ingreso": ratio_deuda
         }
     
-    def evaluar_solicitud(self, datos):
-        ingresos = float(datos.get('ingresos_mensuales', 0))
-        if ingresos < self.reglas['INGRESO_MINIMO']:
-            return {'aprobado': False, 'razon': f'Ingresos insuficientes (mínimo ${self.reglas["INGRESO_MINIMO"]:,})', 'score': 0}
+    def validate_basic_requirements(self, data):
+        """Valida los requisitos básicos según las reglas de negocio"""
+        errors = []
+        warnings = []
         
-        fico = int(datos.get('fico_score', 600))
-        if fico < self.reglas['FICO_MINIMO_APROBACION']:
-            return {'aprobado': False, 'razon': f'FICO Score insuficiente (mínimo {self.reglas["FICO_MINIMO_APROBACION"]})', 'score': 0}
+        score_crediticio = int(data.get('score_crediticio', 0))
+        if score_crediticio < self.rules['score_minimo']:
+            errors.append(f"Score crediticio insuficiente: {score_crediticio} < {self.rules['score_minimo']}")
         
-        generales = self.calcular_variables_generales(datos)
-        historial = self.calcular_historial_crediticio(datos)
-        capacidad = self.calcular_capacidad_pago(datos)
+        edad = int(data.get('edad', 0))
+        if not self.rules['edad_minima'] <= edad <= self.rules['edad_maxima']:
+            errors.append(f"Edad fuera del rango: {edad} (permitido: {self.rules['edad_minima']}-{self.rules['edad_maxima']})")
         
-        score_final = generales['puntos_ponderados'] + historial['puntos_ponderados'] + capacidad['puntos_ponderados']
+        ingresos = float(data.get('ingresos_mensuales', 0))
+        if ingresos < self.rules['ingresos_minimos']:
+            errors.append(f"Ingresos insuficientes: ${ingresos:,.0f} < ${self.rules['ingresos_minimos']:,.0f}")
         
-        if capacidad['tdsr'] > self.reglas['TDSR_MAXIMO']:
-            return {'aprobado': False, 'razon': f'TDSR excesivo ({capacidad["tdsr"]:.1%}, máximo {self.reglas["TDSR_MAXIMO"]:.1%})', 'score': round(score_final, 1)}
+        antiguedad = int(data.get('antiguedad_laboral', 0))
+        if antiguedad < self.rules['antiguedad_laboral_minima']:
+            errors.append(f"Antigüedad laboral insuficiente: {antiguedad} meses < {self.rules['antiguedad_laboral_minima']} meses")
         
-        if score_final < self.reglas['SCORE_MINIMO_APROBACION']:
-            return {'aprobado': False, 'razon': f'Score insuficiente ({score_final:.1f}, mínimo {self.reglas["SCORE_MINIMO_APROBACION"]})', 'score': round(score_final, 1)}
+        deudas = float(data.get('deudas_actuales', 0))
+        ratio_deuda = deudas / ingresos if ingresos > 0 else 1
+        if ratio_deuda > self.rules['ratio_deuda_ingreso_maximo']:
+            errors.append(f"Ratio deuda-ingreso excesivo: {ratio_deuda:.2%} > {self.rules['ratio_deuda_ingreso_maximo']:.2%}")
         
-        condiciones = self.calcular_condiciones_credito(score_final, ingresos, capacidad['tdsr'])
+        return errors, warnings
+    
+    def calculate_credit_offer(self, profile_data, monto_solicitado=None):
+        """Calcula la oferta de crédito basada en el perfil"""
+        profile = profile_data['perfil']
+        if profile == "RECHAZADO":
+            return None
         
-        if score_final >= 350:
-            nivel_riesgo, color = 'Bajo', 'success'
-        elif score_final >= 300:
-            nivel_riesgo, color = 'Medio', 'warning'
+        monto_maximo = self.rules['monto_maximo_por_perfil'][profile]
+        tasa_info = self.rules['tasas_por_perfil'][profile]
+        plazo_info = self.rules['plazos_por_perfil'][profile]
+        
+        monto_ofrecido = monto_maximo
+        if monto_solicitado and monto_solicitado <= monto_maximo:
+            monto_ofrecido = monto_solicitado
+        
+        # Calcular tasa basada en el score interno - CORREGIDO
+        score_ratio = profile_data['score_total'] / 100
+        tasa_range = tasa_info['max'] - tasa_info['min']
+        # A mayor score, menor tasa (tasa mínima + rango reducido por score)
+        tasa_anual = tasa_info['max'] - (score_ratio * tasa_range)
+        tasa_anual = max(tasa_info['min'], min(tasa_info['max'], tasa_anual))
+        
+        # Plazo recomendado basado en monto y perfil
+        if monto_ofrecido <= 50000:
+            plazo_meses = min(24, plazo_info['max'])
+        elif monto_ofrecido <= 100000:
+            plazo_meses = min(36, plazo_info['max'])
         else:
-            nivel_riesgo, color = 'Alto', 'danger'
+            plazo_meses = plazo_info['max']
+        
+        # Calcular pago mensual
+        tasa_mensual = tasa_anual / 100 / 12
+        if tasa_mensual > 0:
+            pago_mensual = monto_ofrecido * (tasa_mensual * (1 + tasa_mensual) ** plazo_meses) / ((1 + tasa_mensual) ** plazo_meses - 1)
+        else:
+            pago_mensual = monto_ofrecido / plazo_meses
         
         return {
-            'aprobado': True, 'score': round(score_final, 1), 'nivel_riesgo': nivel_riesgo, 'color_riesgo': color,
-            'monto_aprobado': condiciones['monto_aprobado'], 'tasa_anual': condiciones['tasa_anual'],
-            'opciones_plazo': condiciones['opciones_plazo'], 'desglose': {'generales': generales, 'historial': historial, 'capacidad': capacidad},
-            'tdsr': capacidad['tdsr'], 'fecha': datetime.now().strftime('%d/%m/%Y %H:%M')
+            "monto_aprobado": round(monto_ofrecido, 2),
+            "tasa_anual": round(tasa_anual, 2),
+            "plazo_meses": plazo_meses,
+            "pago_mensual": round(pago_mensual, 2),
+            "total_a_pagar": round(pago_mensual * plazo_meses, 2),
+            "intereses_totales": round((pago_mensual * plazo_meses) - monto_ofrecido, 2)
         }
+    
+    def evaluate_credit_request(self, data):
+        """Evaluación completa de solicitud de crédito"""
+        try:
+            errors, warnings = self.validate_basic_requirements(data)
+            if errors:
+                return {
+                    "aprobado": False, 
+                    "motivo_rechazo": "No cumple requisitos básicos", 
+                    "errores": errors, 
+                    "advertencias": warnings
+                }
+            
+            profile_data = self.calculate_risk_profile(data)
+            if profile_data['perfil'] == "RECHAZADO":
+                return {
+                    "aprobado": False, 
+                    "motivo_rechazo": "Perfil de riesgo muy alto", 
+                    "perfil_riesgo": profile_data, 
+                    "advertencias": warnings
+                }
+            
+            monto_solicitado = float(data.get('monto_solicitado', 0)) if data.get('monto_solicitado') else None
+            oferta = self.calculate_credit_offer(profile_data, monto_solicitado)
+            
+            return {
+                "aprobado": True,
+                "perfil_riesgo": profile_data,
+                "oferta_credito": oferta,
+                "advertencias": warnings,
+                "fecha_evaluacion": datetime.now().isoformat()
+            }
+        except Exception as e:
+            return {
+                "aprobado": False, 
+                "motivo_rechazo": f"Error en evaluación: {str(e)}", 
+                "error_tecnico": True
+            }
 
-modelo = ModeloScoringCrediticio()
+# Inicializar
+load_business_rules()
+evaluator = CreditEvaluator()
 
-CASOS_ESTUDIO = {
-    'perfil_excelente': {
-        'nombre': 'Dr. Eduardo Silva - AAA',
-        'descripcion': 'Perfil con ingresos muy altos y excelente historial de crédito.',
-        'datos': {'ingresos_mensuales': '80000', 'edad': '45', 'estado_civil': 'casado', 'dependientes': '1', 'nivel_estudios': 'universidad', 'ocupacion': 'empleado_publico', 'antiguedad_empleo': '15', 'antiguedad_domicilio': '10', 'comprobante_domicilio': 'si', 'comprobante_ingresos': 'si', 'fico_score': '800', 'ultima_calificacion': '1', 'numero_consultas': '1', 'tipo_comprobante': 'nomina', 'deuda_mensual': '15000'}
-    },
-    'perfil_alto': {
-        'nombre': 'María González - Empleada Pública',
-        'descripcion': 'Funcionaria con estabilidad laboral y buen historial',
-        'datos': {'ingresos_mensuales': '35000', 'edad': '38', 'estado_civil': 'casado', 'dependientes': '2', 'nivel_estudios': 'universidad', 'ocupacion': 'empleado_publico', 'antiguedad_empleo': '5', 'antiguedad_domicilio': '8', 'comprobante_domicilio': 'si', 'comprobante_ingresos': 'si', 'fico_score': '720', 'ultima_calificacion': '1', 'numero_consultas': '2', 'tipo_comprobante': 'nomina', 'deuda_mensual': '8000'}
-    },
-    'perfil_medio': {
-        'nombre': 'Carlos Rodríguez - Empleado Privado',
-        'descripcion': 'Profesional con historial regular',
-        'datos': {'ingresos_mensuales': '22000', 'edad': '32', 'estado_civil': 'soltero', 'dependientes': '1', 'nivel_estudios': 'preparatoria', 'ocupacion': 'empleado_privado', 'antiguedad_empleo': '3', 'antiguedad_domicilio': '4', 'comprobante_domicilio': 'si', 'comprobante_ingresos': 'si', 'fico_score': '650', 'ultima_calificacion': '2', 'numero_consultas': '6', 'tipo_comprobante': 'nomina', 'deuda_mensual': '5500'}
-    },
-    'perfil_joven': {
-        'nombre': 'Andrea López - Recién Egresada',
-        'descripcion': 'Profesional joven con poco historial crediticio pero buen potencial.',
-        'datos': {'ingresos_mensuales': '18000', 'edad': '25', 'estado_civil': 'soltero', 'dependientes': '0', 'nivel_estudios': 'universidad', 'ocupacion': 'empleado_privado', 'antiguedad_empleo': '1', 'antiguedad_domicilio': '1', 'comprobante_domicilio': 'si', 'comprobante_ingresos': 'si', 'fico_score': '620', 'ultima_calificacion': '2', 'numero_consultas': '3', 'tipo_comprobante': 'nomina', 'deuda_mensual': '2000'}
-    },
-    'perfil_basico': {
-        'nombre': 'Ana Martínez - Trabajadora Independiente',
-        'descripcion': 'Profesional independiente con historial limitado',
-        'datos': {'ingresos_mensuales': '15000', 'edad': '28', 'estado_civil': 'soltero', 'dependientes': '0', 'nivel_estudios': 'universidad', 'ocupacion': 'independiente', 'antiguedad_empleo': '2', 'antiguedad_domicilio': '2', 'comprobante_domicilio': 'si', 'comprobante_ingresos': 'no', 'fico_score': '600', 'ultima_calificacion': '2', 'numero_consultas': '8', 'tipo_comprobante': 'declaracion', 'deuda_mensual': '3000'}
-    }
-}
-
-def is_admin():
-    return session.get('admin_logged_in', False)
-
-@app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
+@app.route('/', methods=['GET', 'POST'])
+def index():
     if request.method == 'POST':
-        password = request.form.get('password')
-        if password == 'RAG123':
-            session['admin_logged_in'] = True
-            return redirect(url_for('admin_reglas'))
-        return render_template_string(TEMPLATE_ADMIN_LOGIN, error="Contraseña incorrecta")
-    return render_template_string(TEMPLATE_ADMIN_LOGIN)
+        try:
+            # Recargar reglas por si fueron actualizadas
+            global business_rules, evaluator
+            load_business_rules()
+            evaluator = CreditEvaluator()
+            
+            form_data = {
+                'nombre': request.form.get('nombre', ''),
+                'edad': int(request.form.get('edad', 0)),
+                'score_crediticio': int(request.form.get('score_crediticio', 0)),
+                'ingresos_mensuales': float(request.form.get('ingresos_mensuales', 0)),
+                'deudas_actuales': float(request.form.get('deudas_actuales', 0)),
+                'antiguedad_laboral': int(request.form.get('antiguedad_laboral', 0)),
+                'monto_solicitado': float(request.form.get('monto_solicitado', 0)) if request.form.get('monto_solicitado') else None,
+                'proposito': request.form.get('proposito', 'personal')
+            }
+            resultado = evaluator.evaluate_credit_request(form_data)
+            return render_template_string(MAIN_TEMPLATE, resultado=resultado)
+        except (ValueError, TypeError) as e:
+            return render_template_string(MAIN_TEMPLATE, resultado={
+                "aprobado": False, 
+                "motivo_rechazo": f"Datos incompletos o incorrectos: {str(e)}"
+            })
+    return render_template_string(MAIN_TEMPLATE, resultado=None)
 
-@app.route('/admin/logout')
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    return redirect(url_for('home'))
-
-@app.route('/admin/reglas')
-def admin_reglas():
-    if not is_admin():
-        return redirect(url_for('admin_login'))
+@app.route('/admin', methods=['GET', 'POST'])
+def admin():
+    global business_rules, evaluator
+    mensaje = None
+    tipo_mensaje = 'info'
     
-    reglas_ui = modelo.reglas.copy()
-    reglas_ui['TASA_MINIMA'] = int(reglas_ui['TASA_MINIMA'] * 100)
-    reglas_ui['TASA_MAXIMA'] = int(reglas_ui['TASA_MAXIMA'] * 100)
-    reglas_ui['TDSR_MAXIMO'] = int(reglas_ui['TDSR_MAXIMO'] * 100)
+    if request.method == 'POST':
+        try:
+            action = request.form.get('action', 'save')
+            if action == 'reset':
+                business_rules = DEFAULT_RULES.copy()
+                save_business_rules()
+                evaluator = CreditEvaluator()
+                mensaje = "✅ Reglas restauradas a valores por defecto"
+                tipo_mensaje = 'success'
+            elif action == 'save':
+                # Actualizar reglas básicas
+                business_rules['score_minimo'] = int(request.form.get('score_minimo', 650))
+                business_rules['edad_minima'] = int(request.form.get('edad_minima', 18))
+                business_rules['edad_maxima'] = int(request.form.get('edad_maxima', 70))
+                business_rules['ingresos_minimos'] = int(request.form.get('ingresos_minimos', 15000))
+                business_rules['antiguedad_laboral_minima'] = int(request.form.get('antiguedad_laboral_minima', 12))
+                business_rules['ratio_deuda_ingreso_maximo'] = float(request.form.get('ratio_deuda_ingreso_maximo', 35)) / 100
+                
+                # Actualizar reglas por perfil
+                for perfil in ['AAA', 'AA', 'A', 'BBB', 'BB', 'B']:
+                    business_rules['monto_maximo_por_perfil'][perfil] = int(request.form.get(f'monto_{perfil}', 50000))
+                    business_rules['tasas_por_perfil'][perfil]['min'] = float(request.form.get(f'tasa_min_{perfil}', 10))
+                    business_rules['tasas_por_perfil'][perfil]['max'] = float(request.form.get(f'tasa_max_{perfil}', 20))
+                    business_rules['plazos_por_perfil'][perfil]['max'] = int(request.form.get(f'plazo_max_{perfil}', 24))
+                    # Mantener plazo mínimo por defecto
+                    if 'min' not in business_rules['plazos_por_perfil'][perfil]:
+                        business_rules['plazos_por_perfil'][perfil]['min'] = 6 if perfil in ['BB', 'B'] else 12
+                
+                save_business_rules()
+                evaluator = CreditEvaluator()
+                mensaje = "✅ Configuración guardada exitosamente"
+                tipo_mensaje = 'success'
+        except Exception as e:
+            mensaje = f"❌ Error al guardar configuración: {str(e)}"
+            tipo_mensaje = 'danger'
     
-    return render_template_string(TEMPLATE_ADMIN_REGLAS, reglas=reglas_ui)
+    return render_template_string(ADMIN_TEMPLATE, 
+                                rules=business_rules, 
+                                mensaje=mensaje, 
+                                tipo_mensaje=tipo_mensaje,
+                                validate_rules=validate_rules,
+                                datetime=datetime)
 
-@app.route('/api/admin/actualizar-reglas', methods=['POST'])
-def actualizar_reglas_api():
-    if not is_admin():
-        return jsonify({'success': False, 'error': 'No autorizado'}), 401
-    
-    try:
-        nuevas_reglas = request.get_json()
-        reglas_validadas = {}
-        for key, value in nuevas_reglas.items():
-            if key in REGLAS_NEGOCIO:
-                if key == 'PLAZOS_AUTORIZADOS':
-                    reglas_validadas[key] = [int(x) for x in value.split(',') if x.strip()]
-                elif key in ['TASA_MINIMA', 'TASA_MAXIMA', 'TDSR_MAXIMO']:
-                    reglas_validadas[key] = float(value) / 100
-                else:
-                    reglas_validadas[key] = float(value) if isinstance(REGLAS_NEGOCIO[key], float) else int(value)
-        
-        REGLAS_NEGOCIO.update(reglas_validadas)
-        modelo.actualizar_reglas(reglas_validadas)
-        return jsonify({'success': True, 'message': 'Reglas actualizadas correctamente'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
+@app.route('/reports')
+def reports():
+    return render_template_string(REPORTS_TEMPLATE)
 
-@app.route('/')
-def home():
-    return render_template_string(TEMPLATE_HOME)
-
-@app.route('/simulador')
-def simulador():
-    return render_template_string(TEMPLATE_SIMULADOR)
-
-@app.route('/casos-estudio')
-def casos_estudio():
-    return render_template_string(TEMPLATE_CASOS, casos=CASOS_ESTUDIO)
-
-@app.route('/api/evaluar', methods=['POST'])
-def evaluar_credito():
-    try:
-        datos = request.get_json()
-        resultado = modelo.evaluar_solicitud(datos)
-        return jsonify({'success': True, 'data': resultado})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
-
-@app.route('/api/caso/<caso_id>')
-def obtener_caso(caso_id):
-    caso_id_map = {
-        'perfil_excelente': 'perfil_excelente',
-        'perfil_alto': 'perfil_alto',
-        'perfil_medio': 'perfil_medio',
-        'perfil_joven': 'perfil_joven',
-        'perfil_basico': 'perfil_basico'
+@app.route('/api/test/<profile>')
+def test_profile(profile):
+    """Endpoint para probar perfiles específicos"""
+    test_data = {
+        'AAA': {
+            'nombre': 'Cliente AAA Test',
+            'edad': 35, 'score_crediticio': 820, 'ingresos_mensuales': 60000,
+            'deudas_actuales': 5000, 'antiguedad_laboral': 60, 'monto_solicitado': 150000
+        },
+        'AA': {
+            'nombre': 'Cliente AA Test',
+            'edad': 40, 'score_crediticio': 780, 'ingresos_mensuales': 45000,
+            'deudas_actuales': 8000, 'antiguedad_laboral': 48, 'monto_solicitado': 120000
+        },
+        'A': {
+            'nombre': 'Cliente A Test',
+            'edad': 30, 'score_crediticio': 720, 'ingresos_mensuales': 30000,
+            'deudas_actuales': 6000, 'antiguedad_laboral': 36, 'monto_solicitado': 80000
+        },
+        'REJECT': {
+            'nombre': 'Cliente Rechazado Test',
+            'edad': 22, 'score_crediticio': 580, 'ingresos_mensuales': 12000,
+            'deudas_actuales': 8000, 'antiguedad_laboral': 6, 'monto_solicitado': 50000
+        }
     }
-    if caso_id in caso_id_map:
-        return jsonify(CASOS_ESTUDIO[caso_id_map[caso_id]])
-    return jsonify({'error': 'Caso no encontrado'}), 404
+    
+    if profile.upper() not in test_data:
+        return jsonify({'error': 'Perfil no encontrado'}), 404
+    
+    data = test_data[profile.upper()]
+    resultado = evaluator.evaluate_credit_request(data)
+    
+    return jsonify({
+        'perfil_test': profile.upper(),
+        'datos_entrada': data,
+        'resultado_evaluacion': resultado
+    })
 
-TEMPLATE_ADMIN_LOGIN = '''
+@app.route('/api/rules')
+def get_rules():
+    """API para obtener las reglas actuales"""
+    return jsonify(business_rules)
+
+@app.route('/api/evaluate', methods=['POST'])
+def api_evaluate():
+    """API para evaluar crédito via JSON"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        resultado = evaluator.evaluate_credit_request(data)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ===== TEMPLATES HTML =====
+MAIN_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Acceso Administrador</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <title>Simulador de Crédito Hotmart</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; color: white; margin-bottom: 30px; }
+        .header h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .header p { font-size: 1.2rem; opacity: 0.9; }
+        .nav-buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
+        .nav-btn { padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); transition: all 0.3s ease; font-weight: 600; }
+        .nav-btn:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
+        .nav-btn.active { background: rgba(255,255,255,0.9); color: #667eea; }
+        .form-card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); margin-bottom: 20px; }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; }
+        .form-group input, .form-group select { width: 100%; padding: 12px; border: 2px solid #e1e1e1; border-radius: 8px; font-size: 16px; transition: border-color 0.3s ease; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #667eea; }
+        .submit-btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 15px 40px; border-radius: 8px; font-size: 18px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; width: 100%; }
+        .submit-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4); }
+        .result-card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); margin-top: 20px; }
+        .result-approved { border-left: 5px solid #28a745; }
+        .result-rejected { border-left: 5px solid #dc3545; }
+        .profile-badge { display: inline-block; padding: 5px 12px; border-radius: 20px; font-weight: bold; text-transform: uppercase; font-size: 12px; }
+        .profile-AAA { background: #28a745; color: white; }
+        .profile-AA { background: #17a2b8; color: white; }
+        .profile-A { background: #007bff; color: white; }
+        .profile-BBB { background: #ffc107; color: black; }
+        .profile-BB { background: #fd7e14; color: white; }
+        .profile-B { background: #dc3545; color: white; }
+        .offer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+        .offer-item { text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px; }
+        .offer-item h4 { color: #667eea; margin-bottom: 10px; }
+        .offer-item .value { font-size: 1.5rem; font-weight: bold; color: #333; }
+        .factors-list { margin: 15px 0; }
+        .factors-list li { margin: 5px 0; padding: 8px; background: #e9ecef; border-radius: 5px; }
+        @media (max-width: 768px) {
+            .header h1 { font-size: 2rem; }
+            .nav-buttons { flex-direction: column; align-items: center; }
+            .form-grid { grid-template-columns: 1fr; }
+        }
+    </style>
 </head>
-<body class="bg-light">
+<body>
     <div class="container">
-        <div class="row justify-content-center mt-5">
-            <div class="col-md-4">
-                <div class="card">
-                    <div class="card-header bg-danger text-white text-center">
-                        <h4><i class="fas fa-shield-alt me-2"></i>Acceso Administrador</h4>
-                    </div>
-                    <div class="card-body">
-                        {% if error %}
-                        <div class="alert alert-danger">{{ error }}</div>
-                        {% endif %}
-                        
-                        <form method="POST">
-                            <div class="mb-3">
-                                <label class="form-label">Contraseña de Administrador:</label>
-                                <input type="password" class="form-control" name="password" required>
-                            </div>
-                            <div class="d-grid">
-                                <button type="submit" class="btn btn-danger">
-                                    <i class="fas fa-sign-in-alt me-2"></i>Acceder
-                                </button>
-                            </div>
-                        </form>
-                        
-                        <div class="text-center mt-3">
-                            <a href="/" class="btn btn-outline-secondary btn-sm">
-                                <i class="fas fa-arrow-left me-1"></i>Volver al Simulador
-                            </a>
-                        </div>
+        <div class="header">
+            <h1>🏦 Simulador de Crédito Hotmart</h1>
+            <p>Sistema Integral de Evaluación Crediticia</p>
+        </div>
+        <div class="nav-buttons">
+            <a href="/" class="nav-btn active">🏠 Evaluación</a>
+            <a href="/admin" class="nav-btn">⚙️ Administración</a>
+            <a href="/reports" class="nav-btn">📊 Reportes</a>
+        </div>
+        <div class="form-card">
+            <form method="POST">
+                <h2 style="margin-bottom: 25px; color: #333;">📋 Información del Solicitante</h2>
+                <div class="form-grid">
+                    <div class="form-group"><label for="nombre">Nombre Completo *</label><input type="text" id="nombre" name="nombre" required></div>
+                    <div class="form-group"><label for="edad">Edad *</label><input type="number" id="edad" name="edad" min="18" max="80" required></div>
+                    <div class="form-group"><label for="score_crediticio">Score Crediticio (300-850) *</label><input type="number" id="score_crediticio" name="score_crediticio" min="300" max="850" required></div>
+                    <div class="form-group"><label for="ingresos_mensuales">Ingresos Mensuales ($) *</label><input type="number" id="ingresos_mensuales" name="ingresos_mensuales" min="0" step="0.01" required></div>
+                    <div class="form-group"><label for="deudas_actuales">Deudas Actuales ($)</label><input type="number" id="deudas_actuales" name="deudas_actuales" min="0" step="0.01" value="0"></div>
+                    <div class="form-group"><label for="antiguedad_laboral">Antigüedad Laboral (meses) *</label><input type="number" id="antiguedad_laboral" name="antiguedad_laboral" min="0" required></div>
+                    <div class="form-group"><label for="monto_solicitado">Monto Solicitado ($)</label><input type="number" id="monto_solicitado" name="monto_solicitado" min="1000" step="1000" placeholder="Opcional - se calculará automáticamente"></div>
+                    <div class="form-group"><label for="proposito">Propósito del Crédito</label><select id="proposito" name="proposito"><option value="personal">Uso Personal</option><option value="auto">Compra de Vehículo</option><option value="vivienda">Mejoras al Hogar</option><option value="educacion">Educación</option><option value="negocio">Inversión en Negocio</option><option value="consolidacion">Consolidación de Deudas</option></select></div>
+                </div>
+                <button type="submit" class="submit-btn">🔍 Evaluar Solicitud de Crédito</button>
+            </form>
+        </div>
+        {% if resultado %}
+        <div class="result-card {% if resultado.aprobado %}result-approved{% else %}result-rejected{% endif %}">
+            <h2 style="margin-bottom: 20px; color: {% if resultado.aprobado %}#28a745{% else %}#dc3545{% endif %};">
+                {% if resultado.aprobado %}✅ CRÉDITO APROBADO{% else %}❌ CRÉDITO RECHAZADO{% endif %}
+            </h2>
+            {% if not resultado.aprobado %}
+            <div style="background: #f8d7da; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                <h4>Motivo del Rechazo:</h4>
+                <p><strong>{{ resultado.motivo_rechazo }}</strong></p>
+                {% if resultado.errores %}
+                <ul style="margin: 10px 0; margin-left: 20px;">
+                {% for error in resultado.errores %}
+                    <li>{{ error }}</li>
+                {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% if resultado.perfil_riesgo %}
+                <div style="background: #e9ecef; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                    <h3>📈 Análisis de Perfil</h3>
+                    <p><span>Perfil de Riesgo: </span><span class="profile-badge profile-{{ resultado.perfil_riesgo.perfil }}">{{ resultado.perfil_riesgo.perfil }}</span></p>
+                    <p><strong>Score Interno:</strong> {{ resultado.perfil_riesgo.score_total }}/100</p>
+                    <p><strong>Ratio Deuda-Ingreso:</strong> {{ "%.2f"|format(resultado.perfil_riesgo.ratio_deuda_ingreso * 100) }}%</p>
+                    <h4 style="margin: 15px 0 10px 0;">Factores Evaluados:</h4>
+                    <ul class="factors-list">
+                    {% for factor in resultado.perfil_riesgo.factores %}
+                        <li>{{ factor }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+            {% endif %}
+            {% if resultado.oferta_credito %}
+                <div style="background: #d4edda; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                    <h3>💰 Oferta de Crédito</h3>
+                    <div class="offer-grid">
+                        <div class="offer-item"><h4>Monto Aprobado</h4><div class="value">${{ "{:,.0f}".format(resultado.oferta_credito.monto_aprobado) }}</div></div>
+                        <div class="offer-item"><h4>Tasa Anual</h4><div class="value">{{ resultado.oferta_credito.tasa_anual }}%</div></div>
+                        <div class="offer-item"><h4>Plazo</h4><div class="value">{{ resultado.oferta_credito.plazo_meses }} meses</div></div>
+                        <div class="offer-item"><h4>Pago Mensual</h4><div class="value">${{ "{:,.0f}".format(resultado.oferta_credito.pago_mensual) }}</div></div>
+                        <div class="offer-item"><h4>Total a Pagar</h4><div class="value">${{ "{:,.0f}".format(resultado.oferta_credito.total_a_pagar) }}</div></div>
+                        <div class="offer-item"><h4>Intereses Totales</h4><div class="value">${{ "{:,.0f}".format(resultado.oferta_credito.intereses_totales) }}</div></div>
                     </div>
                 </div>
-            </div>
+            {% endif %}
+            {% if resultado.advertencias %}
+                <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                    <h4>⚠️ Advertencias:</h4>
+                    <ul style="margin: 10px 0; margin-left: 20px;">
+                    {% for warning in resultado.advertencias %}
+                        <li>{{ warning }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+            {% endif %}
         </div>
+        {% endif %}
     </div>
 </body>
 </html>
 '''
 
-TEMPLATE_ADMIN_REGLAS = '''
+ADMIN_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reglas de Negocio - Administrador</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-</head>
-<body>
-    <nav class="navbar navbar-dark bg-danger">
-        <div class="container">
-            <span class="navbar-brand">
-                <i class="fas fa-cogs me-2"></i>Panel de Administración - Reglas de Negocio
-            </span>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/admin/logout">
-                    <i class="fas fa-sign-out-alt me-1"></i>Cerrar Sesión
-                </a>
-            </div>
-        </div>
-    </nav>
-
-    <div class="container mt-4">
-        <div class="alert alert-success">
-            <h5><i class="fas fa-info-circle me-2"></i>Panel de Administración Activo</h5>
-            <p class="mb-0">Puedes ajustar todas las reglas de negocio del simulador desde aquí.</p>
-        </div>
-        
-        <div class="row">
-            <div class="col-md-8">
-                <div class="card">
-                    <div class="card-header bg-primary text-white">
-                        <h5><i class="fas fa-sliders-h me-2"></i>Configuración de Reglas de Negocio</h5>
-                    </div>
-                    <div class="card-body">
-                        <form id="reglas-form">
-                            <div class="row">
-                                <div class="col-md-6">
-                                    <h6 class="text-primary">Parámetros de Scoring</h6>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Score Mínimo para Aprobación:</label>
-                                        <input type="number" class="form-control" name="SCORE_MINIMO_APROBACION" 
-                                               value="{{ reglas.SCORE_MINIMO_APROBACION }}" min="100" max="400">
-                                        <small class="text-muted">Actual: {{ reglas.SCORE_MINIMO_APROBACION }} puntos</small>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">FICO Score Mínimo:</label>
-                                        <input type="number" class="form-control" name="FICO_MINIMO_APROBACION" 
-                                               value="{{ reglas.FICO_MINIMO_APROBACION }}" min="300" max="650">
-                                        <small class="text-muted">Actual: {{ reglas.FICO_MINIMO_APROBACION }}</small>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Factor de Scoring:</label>
-                                        <input type="number" class="form-control" name="FACTOR_SCORING" 
-                                               value="{{ reglas.FACTOR_SCORING }}" min="0.5" max="2.0" step="0.1">
-                                        <small class="text-muted">Actual: {{ reglas.FACTOR_SCORING }}x (multiplica los puntajes)</small>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">Bonus Perfil Joven (+22-30 años):</label>
-                                        <input type="number" class="form-control" name="BONUS_JOVEN"
-                                               value="{{ reglas.BONUS_JOVEN }}" min="0" max="50">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">Bonus Educación Universitaria:</label>
-                                        <input type="number" class="form-control" name="BONUS_UNIVERSIDAD"
-                                               value="{{ reglas.BONUS_UNIVERSIDAD }}" min="0" max="50">
-                                    </div>
-                                </div>
-                                
-                                <div class="col-md-6">
-                                    <h6 class="text-success">Parámetros Financieros</h6>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Ingreso Mínimo (MXN):</label>
-                                        <input type="number" class="form-control" name="INGRESO_MINIMO" 
-                                               value="{{ reglas.INGRESO_MINIMO }}" min="5000" max="20000">
-                                        <small class="text-muted">Actual: ${{ reglas.INGRESO_MINIMO:,}}</small>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Monto Máximo de Crédito (MXN):</label>
-                                        <input type="number" class="form-control" name="MONTO_MAXIMO_CREDITO" 
-                                               value="{{ reglas.MONTO_MAXIMO_CREDITO }}" min="50000" max="500000">
-                                        <small class="text-muted">Actual: ${{ reglas.MONTO_MAXIMO_CREDITO:,}}</small>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">TDSR Máximo (%):</label>
-                                        <input type="number" class="form-control" name="TDSR_MAXIMO" 
-                                               value="{{ reglas.TDSR_MAXIMO }}" min="30" max="60">
-                                        <small class="text-muted">Actual: {{ reglas.TDSR_MAXIMO }}%</small>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="row">
-                                <div class="col-md-6">
-                                    <h6 class="text-info">Tasas de Interés</h6>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Tasa Mínima (% anual):</label>
-                                        <input type="number" class="form-control" name="TASA_MINIMA" 
-                                               value="{{ reglas.TASA_MINIMA }}" min="15" max="30" step="1">
-                                        <small class="text-muted">Actual: {{ reglas.TASA_MINIMA }}%</small>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Tasa Máxima (% anual):</label>
-                                        <input type="number" class="form-control" name="TASA_MAXIMA" 
-                                               value="{{ reglas.TASA_MAXIMA }}" min="25" max="50" step="1">
-                                        <small class="text-muted">Actual: {{ reglas.TASA_MAXIMA }}%</small>
-                                    </div>
-                                </div>
-                                
-                                <div class="col-md-6">
-                                    <h6 class="text-warning">Plazos Disponibles</h6>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label">Plazos Autorizados (meses):</label>
-                                        <input type="text" class="form-control" name="PLAZOS_AUTORIZADOS" 
-                                               value="{{ reglas.PLAZOS_AUTORIZADOS|join(',') }}">
-                                        <small class="text-muted">Actual: {{ reglas.PLAZOS_AUTORIZADOS|join(', ') }} meses</small>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="text-center mt-4">
-                                <button type="button" class="btn btn-success btn-lg me-3" onclick="actualizarReglas()">
-                                    <i class="fas fa-save me-2"></i>Guardar Cambios
-                                </button>
-                                <button type="button" class="btn btn-warning btn-lg me-3" onclick="resetearReglas()">
-                                    <i class="fas fa-undo me-2"></i>Valores por Defecto
-                                </button>
-                                <a href="/" class="btn btn-outline-secondary btn-lg">
-                                    <i class="fas fa-eye me-2"></i>Ver Simulador
-                                </a>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-4">
-                <div class="card">
-                    <div class="card-header bg-info text-white">
-                        <h6><i class="fas fa-lightbulb me-2"></i>Sugerencias Rápidas</h6>
-                    </div>
-                    <div class="card-body">
-                        <div class="d-grid gap-2 mb-3">
-                            <button class="btn btn-outline-success btn-sm" onclick="aplicarConfiguracion('permisivo')">
-                                🟢 Más Permisivo
-                            </button>
-                            <button class="btn btn-outline-warning btn-sm" onclick="aplicarConfiguracion('equilibrado')">
-                                🟡 Equilibrado
-                            </button>
-                            <button class="btn btn-outline-danger btn-sm" onclick="aplicarConfiguracion('restrictivo')">
-                                🔴 Más Restrictivo
-                            </button>
-                            <button class="btn btn-outline-primary btn-sm" onclick="aplicarConfiguracion('ultra_permisivo')">
-                                🚀 Ultra Permisivo (V2.0)
-                            </button>
-                        </div>
-                        
-                        <div class="alert alert-info p-2">
-                            <small>
-                                <strong>Configuración Actual:</strong><br>
-                                • Score Min: {{ reglas.SCORE_MINIMO_APROBACION }}<br>
-                                • Factor: {{ reglas.FACTOR_SCORING }}x<br>
-                                • FICO Min: {{ reglas.FICO_MINIMO_APROBACION }}<br>
-                                • TDSR Max: {{ reglas.TDSR_MAXIMO }}%
-                            </small>
-                        </div>
-                        
-                        <div class="mt-3">
-                            <h6>Prueba Rápida:</h6>
-                            <div class="d-grid gap-1">
-                                <a href="/simulador" class="btn btn-outline-primary btn-sm" target="_blank">
-                                    <i class="fas fa-calculator me-1"></i>Abrir Simulador
-                                </a>
-                                <a href="/casos-estudio" class="btn btn-outline-success btn-sm" target="_blank">
-                                    <i class="fas fa-users me-1"></i>Probar Casos
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        function actualizarReglas() {
-            const form = document.getElementById('reglas-form');
-            const formData = new FormData(form);
-            const data = {};
-            
-            for (let [key, value] of formData.entries()) {
-                if (key.includes('TASA_') || key === 'TDSR_MAXIMO') {
-                    data[key] = parseFloat(value);
-                } else if (key === 'PLAZOS_AUTORIZADOS') {
-                    data[key] = value;
-                } else if (key === 'FACTOR_SCORING') {
-                    data[key] = parseFloat(value);
-                } else {
-                    data[key] = parseInt(value);
-                }
-            }
-            
-            fetch('/api/admin/actualizar-reglas', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            })
-            .then(response => response.json())
-            .then(result => {
-                if (result.success) {
-                    alert('✅ Reglas actualizadas correctamente');
-                    location.reload();
-                } else {
-                    alert('❌ Error: ' + result.error);
-                }
-            });
-        }
-        
-        function resetearReglas() {
-            if (confirm('¿Estás seguro de que quieres resetear todas las reglas a los valores por defecto?')) {
-                const valoresDefecto = {
-                    'SCORE_MINIMO_APROBACION': 250,
-                    'FICO_MINIMO_APROBACION': 500,
-                    'FACTOR_SCORING': 1.2,
-                    'INGRESO_MINIMO': 8000,
-                    'MONTO_MAXIMO_CREDITO': 150000,
-                    'TDSR_MAXIMO': 45,
-                    'TASA_MINIMA': 22,
-                    'TASA_MAXIMA': 38,
-                    'BONUS_JOVEN': 0,
-                    'BONUS_UNIVERSIDAD': 0,
-                    'PLAZOS_AUTORIZADOS': '3,6,9,12'
-                };
-                
-                for (let [key, value] of Object.entries(valoresDefecto)) {
-                    const input = document.querySelector(`input[name="${key}"]`);
-                    if (input) {
-                        input.value = value;
-                    }
-                }
-                
-                alert('Valores reseteados. Haz clic en "Guardar Cambios" para aplicar.');
-            }
-        }
-        
-        function aplicarConfiguracion(tipo) {
-            let config = {};
-            
-            if (tipo === 'permisivo') {
-                config = { 'SCORE_MINIMO_APROBACION': 220, 'FICO_MINIMO_APROBACION': 480, 'FACTOR_SCORING': 1.3, 'TDSR_MAXIMO': 50, 'TASA_MINIMA': 20, 'TASA_MAXIMA': 45, 'BONUS_JOVEN': 15, 'BONUS_UNIVERSIDAD': 15, 'MONTO_MAXIMO_CREDITO': 180000, 'PLAZOS_AUTORIZADOS': '3,6,9,12,18'};
-            } else if (tipo === 'equilibrado') {
-                config = { 'SCORE_MINIMO_APROBACION': 250, 'FICO_MINIMO_APROBACION': 500, 'FACTOR_SCORING': 1.2, 'TDSR_MAXIMO': 45, 'TASA_MINIMA': 22, 'TASA_MAXIMA': 38, 'BONUS_JOVEN': 0, 'BONUS_UNIVERSIDAD': 0, 'MONTO_MAXIMO_CREDITO': 150000, 'PLAZOS_AUTORIZADOS': '3,6,9,12'};
-            } else if (tipo === 'restrictivo') {
-                config = { 'SCORE_MINIMO_APROBACION': 300, 'FICO_MINIMO_APROBACION': 600, 'FACTOR_SCORING': 1.0, 'TDSR_MAXIMO': 35, 'TASA_MINIMA': 25, 'TASA_MAXIMA': 38, 'BONUS_JOVEN': 0, 'BONUS_UNIVERSIDAD': 0, 'MONTO_MAXIMO_CREDITO': 120000, 'PLAZOS_AUTORIZADOS': '3,6,9'};
-            } else if (tipo === 'ultra_permisivo') {
-                config = { 'SCORE_MINIMO_APROBACION': 200, 'FICO_MINIMO_APROBACION': 450, 'FACTOR_SCORING': 1.5, 'TDSR_MAXIMO': 55, 'TASA_MINIMA': 18, 'TASA_MAXIMA': 50, 'BONUS_JOVEN': 25, 'BONUS_UNIVERSIDAD': 20, 'MONTO_MAXIMO_CREDITO': 200000, 'PLAZOS_AUTORIZADOS': '3,6,9,12,18,24'};
-            }
-            
-            for (let [key, value] of Object.entries(config)) {
-                const input = document.querySelector(`[name="${key}"]`);
-                if (input) input.value = value;
-            }
-            
-            alert(`Configuración "${tipo}" aplicada. Haz clic en "Guardar Cambios" para aplicar.`);
-        }
-        
-        document.addEventListener('DOMContentLoaded', function() {
-            const inputs = document.querySelectorAll('input[type="number"]');
-            inputs.forEach(input => {
-                input.addEventListener('change', function() {
-                    const min = parseFloat(this.min);
-                    const max = parseFloat(this.max);
-                    const value = parseFloat(this.value);
-                    if (value < min) { this.value = min; alert(`Valor mínimo permitido: ${min}`); } 
-                    else if (value > max) { this.value = max; alert(`Valor máximo permitido: ${max}`); }
-                });
-            });
-        });
-    </script>
-</body>
-</html>
-'''
-
-TEMPLATE_HOME = '''
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulador de Crédito - Versión Calibrada V2.0</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <title>Panel de Administración - Hotmart Credit</title>
     <style>
-        .hero-gradient { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .card-hover:hover { transform: translateY(-5px); transition: all 0.3s ease; }
-        .feature-icon { width: 80px; height: 80px; margin: 0 auto; background: rgba(255,255,255,0.1); }
-        .admin-link { position: fixed; bottom: 20px; right: 20px; z-index: 1000; }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
-        .stats-counter { font-size: 2.5rem; font-weight: bold; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; color: white; margin-bottom: 30px; }
+        .header h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .nav-buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
+        .nav-btn { padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); transition: all 0.3s ease; font-weight: 600; }
+        .nav-btn:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
+        .nav-btn.active { background: rgba(255,255,255,0.9); color: #667eea; }
+        .admin-card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); margin-bottom: 30px; }
+        .admin-section { margin-bottom: 40px; }
+        .admin-section h3 { color: #333; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #667eea; }
+        .rules-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .rule-group { background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #667eea; }
+        .rule-group h4 { color: #333; margin-bottom: 15px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #555; }
+        .form-group input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        .profile-rules { background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 10px 0; }
+        .profile-title { font-weight: bold; margin-bottom: 10px; color: #333; }
+        .profile-inputs { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+        .btn-primary { background: #667eea; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; }
+        .btn-primary:hover { background: #5a67d8; }
+        .btn-secondary { background: #6c757d; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-left: 10px; }
+        .btn-secondary:hover { background: #5a6268; }
+        .alert { padding: 15px; border-radius: 5px; margin: 15px 0; }
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        @media (max-width: 768px) {
+            .rules-grid { grid-template-columns: 1fr; }
+            .profile-inputs { grid-template-columns: 1fr 1fr; }
+        }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="/">
-                <i class="fas fa-rocket me-2"></i>Simulador de Crédito Calibrado V2.0
-            </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/simulador">Simulador</a>
-                <a class="nav-link" href="/casos-estudio">Casos de Estudio</a>
-            </div>
+    <div class="container">
+        <div class="header"><h1>⚙️ Panel de Administración</h1><p>Configuración de Reglas de Negocio</p></div>
+        <div class="nav-buttons">
+            <a href="/" class="nav-btn">🏠 Evaluación</a>
+            <a href="/admin" class="nav-btn active">⚙️ Administración</a>
+            <a href="/reports" class="nav-btn">📊 Reportes</a>
         </div>
-    </nav>
-
-    <div class="container mt-4">
-        <div class="hero-gradient text-white p-5 rounded mb-5">
-            <div class="row align-items-center">
-                <div class="col-md-8">
-                    <h1 class="display-4 mb-3">
-                        <i class="fas fa-rocket me-3"></i>
-                        Simulador Calibrado V2.0
-                    </h1>
-                    <p class="lead mb-3">
-                        Herramienta educativa con <strong>modelo matemático calibrado</strong> 
-                        para máxima flexibilidad y 95%+ aprobaciones
-                    </p>
-                    <div class="mb-4">
-                        <span class="badge bg-light text-dark me-2 pulse">🚀 ULTRA OPTIMIZADO</span>
-                        <span class="badge bg-light text-dark me-2">📊 Scoring Inteligente</span>
-                        <span class="badge bg-light text-dark me-2">🎯 95%+ Aprobación</span>
-                        <span class="badge bg-light text-dark">⚡ Bonificaciones Automáticas</span>
-                    </div>
-                    <a href="/simulador" class="btn btn-light btn-lg me-3">
-                        <i class="fas fa-play me-2"></i>Comenzar Simulación
-                    </a>
-                    <a href="/casos-estudio" class="btn btn-outline-light btn-lg">
-                        <i class="fas fa-users me-2"></i>5 Casos Calibrados
-                    </a>
-                </div>
-                <div class="col-md-4 text-center">
-                    <div class="bg-white bg-opacity-10 p-4 rounded">
-                        <h3>✨ Versión 2.0</h3>
-                        <p>Calibrado para máxima aprobación y mejor experiencia de usuario</p>
-                        <div class="stats-counter text-warning">95%+</div>
-                        <small>Tasa de Aprobación</small>
+        {% if mensaje %}<div class="alert alert-{{ tipo_mensaje }}">{{ mensaje }}</div>{% endif %}
+        <div class="admin-card">
+            <form method="POST">
+                <div class="admin-section">
+                    <h3>📋 Requisitos Básicos</h3>
+                    <div class="rules-grid">
+                        <div class="rule-group">
+                            <h4>Score Crediticio</h4>
+                            <div class="form-group"><label>Score Mínimo Requerido</label><input type="number" name="score_minimo" value="{{ rules.score_minimo }}" min="300" max="850"></div>
+                        </div>
+                        <div class="rule-group">
+                            <h4>Edad</h4>
+                            <div class="form-group"><label>Edad Mínima</label><input type="number" name="edad_minima" value="{{ rules.edad_minima }}" min="18" max="25"></div>
+                            <div class="form-group"><label>Edad Máxima</label><input type="number" name="edad_maxima" value="{{ rules.edad_maxima }}" min="60" max="80"></div>
+                        </div>
+                        <div class="rule-group">
+                            <h4>Ingresos y Empleo</h4>
+                            <div class="form-group"><label>Ingresos Mínimos ($)</label><input type="number" name="ingresos_minimos" value="{{ rules.ingresos_minimos }}" min="5000" step="1000"></div>
+                            <div class="form-group"><label>Antigüedad Laboral Mínima (meses)</label><input type="number" name="antiguedad_laboral_minima" value="{{ rules.antiguedad_laboral_minima }}" min="1" max="60"></div>
+                        </div>
+                        <div class="rule-group">
+                            <h4>Endeudamiento</h4>
+                            <div class="form-group"><label>Ratio Deuda-Ingreso Máximo (%)</label><input type="number" name="ratio_deuda_ingreso_maximo" value="{{ (rules.ratio_deuda_ingreso_maximo * 100)|round|int }}" min="10" max="50" step="5"></div>
+                        </div>
                     </div>
                 </div>
-            </div>
+                <div class="admin-section">
+                    <h3>💰 Configuración por Perfil de Riesgo</h3>
+                    {% for perfil in ['AAA', 'AA', 'A', 'BBB', 'BB', 'B'] %}
+                    <div class="profile-rules">
+                        <div class="profile-title">Perfil {{ perfil }}</div>
+                        <div class="profile-inputs">
+                            <div><label>Monto Máximo ($)</label><input type="number" name="monto_{{ perfil }}" value="{{ rules.monto_maximo_por_perfil[perfil] }}" min="10000" step="5000"></div>
+                            <div><label>Tasa Mín (%)</label><input type="number" name="tasa_min_{{ perfil }}" value="{{ rules.tasas_por_perfil[perfil].min }}" min="5" max="40" step="0.5"></div>
+                            <div><label>Tasa Máx (%)</label><input type="number" name="tasa_max_{{ perfil }}" value="{{ rules.tasas_por_perfil[perfil].max }}" min="5" max="40" step="0.5"></div>
+                            <div><label>Plazo Máx (meses)</label><input type="number" name="plazo_max_{{ perfil }}" value="{{ rules.plazos_por_perfil[perfil].max }}" min="6" max="72" step="6"></div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div style="text-align: center; margin-top: 30px;">
+                    <button type="submit" name="action" value="save" class="btn-primary">💾 Guardar Configuración</button>
+                    <button type="submit" name="action" value="reset" class="btn-secondary">🔄 Restaurar Valores por Defecto</button>
+                </div>
+            </form>
         </div>
-
-        <div class="row mb-5">
-            <div class="col-12 text-center mb-4">
-                <h2><i class="fas fa-magic text-primary me-2"></i>Mejoras de Calibración V2.0</h2>
-                <p class="lead">Sistema optimizado con bonificaciones inteligentes y penalizaciones balanceadas</p>
-            </div>
-            
-            <div class="col-md-3">
-                <div class="card card-hover text-center h-100 border-success">
-                    <div class="card-body">
-                        <div class="feature-icon bg-success text-white rounded-circle d-flex align-items-center justify-content-center mb-3">
-                            <i class="fas fa-gift fa-2x"></i>
-                        </div>
-                        <h5>Bonificaciones</h5>
-                        <p class="small">+25 pts perfil joven<br>+20 pts educación superior</p>
-                        <span class="badge bg-success">Inteligente</span>
-                    </div>
+        <div class="admin-card">
+            <h3>📊 Estado Actual del Sistema</h3>
+            <div class="rules-grid">
+                <div class="rule-group">
+                    <h4>Configuración Activa</h4>
+                    <p><strong>Fecha de última actualización:</strong> {{ datetime.now().strftime('%Y-%m-%d %H:%M:%S') }}</p>
+                    <p><strong>Perfiles configurados:</strong> {{ rules.monto_maximo_por_perfil.keys()|list|length }}</p>
+                    <p><strong>Score mínimo:</strong> {{ rules.score_minimo }}</p>
+                    <p><strong>Monto máximo general:</strong> ${{ "{:,}".format(rules.monto_maximo_por_perfil.AAA) }}</p>
                 </div>
-            </div>
-            
-            <div class="col-md-3">
-                <div class="card card-hover text-center h-100 border-warning">
-                    <div class="card-body">
-                        <div class="feature-icon bg-warning text-white rounded-circle d-flex align-items-center justify-content-center mb-3">
-                            <i class="fas fa-balance-scale fa-2x"></i>
-                        </div>
-                        <h5>Penalizaciones</h5>
-                        <p class="small">Balanceadas por deuda alta<br>Justas y calibradas</p>
-                        <span class="badge bg-warning">Equilibrado</span>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-3">
-                <div class="card card-hover text-center h-100 border-info">
-                    <div class="card-body">
-                        <div class="feature-icon bg-info text-white rounded-circle d-flex align-items-center justify-content-center mb-3">
-                            <i class="fas fa-chart-line fa-2x"></i>
-                        </div>
-                        <h5>Estadísticas</h5>
-                        <p class="small">Monitoreo en tiempo real<br>Métricas de rendimiento</p>
-                        <span class="badge bg-info">Tiempo Real</span>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-3">
-                <div class="card card-hover text-center h-100 border-danger">
-                    <div class="card-body">
-                        <div class="feature-icon bg-danger text-white rounded-circle d-flex align-items-center justify-content-center mb-3">
-                            <i class="fas fa-cogs fa-2x"></i>
-                        </div>
-                        <h5>Configuración</h5>
-                        <p class="small">4 modos preestablecidos<br>Ultra permisivo disponible</p>
-                        <span class="badge bg-danger">Avanzado</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="row mb-5">
-            <div class="col-md-6">
-                <div class="card border-primary h-100">
-                    <div class="card-body text-center">
-                        <h4 class="text-primary">🚀 Simulador Calibrado</h4>
-                        <p>Evalúa perfiles con nuestro modelo optimizado V2.0</p>
-                        <ul class="list-unstyled text-start">
-                            <li>✅ Score mínimo: 200 pts (ultra permisivo)</li>
-                            <li>✅ FICO mínimo: 450 (muy flexible)</li>
-                            <li>✅ Factor scoring: 1.5x (aumentado)</li>
-                            <li>✅ TDSR máximo: 55% (ampliado)</li>
-                            <li>✅ Bonificaciones automáticas activas</li>
-                        </ul>
-                        <a href="/simulador" class="btn btn-primary btn-lg">
-                            <i class="fas fa-calculator me-2"></i>Evaluar Ahora
-                        </a>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-6">
-                <div class="card border-success h-100">
-                    <div class="card-body text-center">
-                        <h4 class="text-success">📚 Casos Calibrados</h4>
-                        <p>5 perfiles diversos con resultados optimizados</p>
-                        <ul class="list-unstyled text-start">
-                            <li>⭐ Perfil Excelente (Dr. Silva) - 400+ pts</li>
-                            <li>🌟 Perfil Alto (María González) - 350+ pts</li>
-                            <li>📊 Perfil Medio (Carlos Rodríguez) - 280+ pts</li>
-                            <li>🌱 Perfil Joven (Andrea López) - Con bonus +25</li>
-                            <li>💼 Perfil Básico (Ana Martínez) - Ahora viable</li>
-                        </ul>
-                        <a href="/casos-estudio" class="btn btn-success btn-lg">
-                            <i class="fas fa-users me-2"></i>Explorar Casos
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h5><i class="fas fa-trophy text-warning me-2"></i>Beneficios del Modelo Calibrado V2.0</h5>
-                        <div class="row">
-                            <div class="col-md-4">
-                                <h6 class="text-success">Mayor Aprobación</h6>
-                                <ul class="list-unstyled">
-                                    <li><i class="fas fa-arrow-up text-success me-2"></i>Score mínimo reducido a 200</li>
-                                    <li><i class="fas fa-check text-success me-2"></i>FICO mínimo muy permisivo (450)</li>
-                                    <li><i class="fas fa-rocket text-success me-2"></i>Factor de scoring 1.5x</li>
-                                    <li><i class="fas fa-percentage text-success me-2"></i>TDSR hasta 55%</li>
-                                    <li><i class="fas fa-chart-line text-success me-2"></i>Tasa aprobación 95%+</li>
-                                </ul>
-                            </div>
-                            <div class="col-md-4">
-                                <h6 class="text-info">Bonificaciones Inteligentes</h6>
-                                <ul class="list-unstyled">
-                                    <li><i class="fas fa-gift text-info me-2"></i>+25 pts para perfiles jóvenes (22-30)</li>
-                                    <li><i class="fas fa-graduation-cap text-info me-2"></i>+20 pts por educación universitaria</li>
-                                    <li><i class="fas fa-briefcase text-info me-2"></i>Factor 1.2x por estabilidad laboral</li>
-                                    <li><i class="fas fa-calendar text-info me-2"></i>Hasta 6 plazos disponibles (3-24m)</li>
-                                    <li><i class="fas fa-dollar-sign text-info me-2"></i>Montos más altos calculados</li>
-                                </ul>
-                            </div>
-                            <div class="col-md-4">
-                                <h6 class="text-primary">Métricas Avanzadas</h6>
-                                <ul class="list-unstyled">
-                                    <li><i class="fas fa-chart-bar text-primary me-2"></i>Estadísticas en tiempo real</li>
-                                    <li><i class="fas fa-target text-primary me-2"></i>Tasa de aprobación monitoreada</li>
-                                    <li><i class="fas fa-cog text-primary me-2"></i>4 configuraciones preestablecidas</li>
-                                    <li><i class="fas fa-rocket text-primary me-2"></i>Modo ultra permisivo disponible</li>
-                                    <li><i class="fas fa-sync text-primary me-2"></i>Auto-actualización cada 30s</li>
-                                </ul>
-                            </div>
-                        </div>
-                        
-                        <div class="text-center mt-4">
-                            <div class="row">
-                                <div class="col-md-3">
-                                    <div class="card border-success">
-                                        <div class="card-body text-center p-2">
-                                            <div class="stats-counter text-success">95%+</div>
-                                            <small>Tasa Aprobación</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card border-info">
-                                        <div class="card-body text-center p-2">
-                                            <div class="stats-counter text-info">1.5x</div>
-                                            <small>Factor Scoring</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card border-warning">
-                                        <div class="card-body text-center p-2">
-                                            <div class="stats-counter text-warning">+45</div>
-                                            <small>Bonificaciones Max</small>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <div class="card border-primary">
-                                        <div class="card-body text-center p-2">
-                                            <div class="stats-counter text-primary">200</div>
-                                            <small>Score Mínimo</small>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="mt-4">
-                                <span class="badge bg-success me-2 fs-6">✨ Bonificaciones Automáticas</span>
-                                <span class="badge bg-info me-2 fs-6">📊 Penalizaciones Balanceadas</span>
-                                <span class="badge bg-warning me-2 fs-6">⚡ Estadísticas en Vivo</span>
-                                <span class="badge bg-primary fs-6">🚀 Ultra Optimizado</span>
-                            </div>
-                        </div>
-                    </div>
+                <div class="rule-group">
+                    <h4>Validación de Reglas</h4>
+                    {% set validation = validate_rules(rules) %}
+                    {% for item in validation %}
+                        <p style="color: {{ 'green' if item.startswith('✓') else 'red' }};">{{ item }}</p>
+                    {% endfor %}
                 </div>
             </div>
         </div>
     </div>
-
-    <a href="/admin/login" class="admin-link btn btn-danger btn-sm pulse" title="Panel de Administración Calibrado">
-        <i class="fas fa-rocket"></i>
-    </a>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const counters = document.querySelectorAll('.stats-counter');
-            counters.forEach(counter => {
-                const target = counter.textContent;
-                const isPercentage = target.includes('%');
-                const isMultiplier = target.includes('x');
-                const isPlus = target.includes('+');
-                
-                let finalValue = parseFloat(target.replace(/[^\d.]/g, ''));
-                if (isNaN(finalValue)) finalValue = 95;
-                
-                let current = 0;
-                const increment = finalValue / 50;
-                
-                const timer = setInterval(() => {
-                    current += increment;
-                    if (current >= finalValue) {
-                        current = finalValue;
-                        clearInterval(timer);
-                    }
-                    
-                    let display = isPercentage || isMultiplier ? current.toFixed(1) : Math.floor(current);
-                    if (isPercentage) display += '%+';
-                    else if (isMultiplier) display += 'x';
-                    else if (isPlus) display = '+' + Math.floor(current);
-                    
-                    counter.textContent = display;
-                }, 50);
-            });
-        });
-    </script>
 </body>
 </html>
 '''
 
-TEMPLATE_SIMULADOR = '''
+REPORTS_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulador de Crédito - Evaluación Profesional</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <title>Reportes - Hotmart Credit</title>
     <style>
-        .form-section { border-left: 4px solid #007bff; padding-left: 15px; margin-bottom: 30px; }
-        .resultado-aprobado { background: linear-gradient(135deg, #28a745, #20c997); }
-        .resultado-rechazado { background: linear-gradient(135deg, #dc3545, #fd7e14); }
-        .score-circle { width: 120px; height: 120px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; margin: 0 auto; }
-        .detalles-scoring { font-size: 0.9em; }
-        .progress-custom { height: 25px; }
-        .bg-outline-success { border: 1px solid #28a745; color: #28a745; background-color: transparent; }
-        .bg-outline-info { border: 1px solid #17a2b8; color: #17a2b8; background-color: transparent; }
-        .bg-outline-warning { border: 1px solid #ffc107; color: #ffc107; background-color: transparent; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; color: white; margin-bottom: 30px; }
+        .header h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .nav-buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
+        .nav-btn { padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); transition: all 0.3s ease; font-weight: 600; }
+        .nav-btn:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
+        .nav-btn.active { background: rgba(255,255,255,0.9); color: #667eea; }
+        .card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); text-align: center; }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="/">
-                <i class="fas fa-calculator me-2"></i>Simulador de Crédito
-            </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/">Inicio</a>
-                <a class="nav-link" href="/casos-estudio">Casos de Estudio</a>
-            </div>
+    <div class="container">
+        <div class="header"><h1>📊 Reportes</h1><p>Análisis y Estadísticas del Sistema</p></div>
+        <div class="nav-buttons">
+            <a href="/" class="nav-btn">🏠 Evaluación</a>
+            <a href="/admin" class="nav-btn">⚙️ Administración</a>
+            <a href="/reports" class="nav-btn active">📊 Reportes</a>
         </div>
-    </nav>
-
-    <div class="container mt-4">
-        <div class="row">
-            <div class="col-lg-8">
-                <div class="card">
-                    <div class="card-header bg-primary text-white">
-                        <h4><i class="fas fa-user-check me-2"></i>Evaluación Crediticia Profesional</h4>
-                        <p class="mb-0">Complete todos los campos para obtener su evaluación</p>
-                    </div>
-                    <div class="card-body">
-                        <form id="formulario-credito">
-                            <div class="form-section">
-                                <h5 class="text-primary mb-3"><i class="fas fa-user me-2"></i>Información Personal</h5>
-                                <div class="row">
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Edad:</label><input type="number" class="form-control" name="edad" min="18" max="75" value="35" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Estado Civil:</label><select class="form-control" name="estado_civil" required><option value="soltero">Soltero(a)</option><option value="casado" selected>Casado(a)</option><option value="divorciado">Divorciado(a)</option><option value="viudo">Viudo(a)</option></select></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Dependientes Económicos:</label><input type="number" class="form-control" name="dependientes" min="0" max="10" value="2" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Nivel de Estudios:</label><select class="form-control" name="nivel_estudios" required><option value="primaria">Primaria</option><option value="secundaria">Secundaria</option><option value="preparatoria">Preparatoria</option><option value="universidad" selected>Universidad</option></select></div></div>
-                                </div>
-                            </div>
-                            <div class="form-section">
-                                <h5 class="text-success mb-3"><i class="fas fa-briefcase me-2"></i>Información Laboral</h5>
-                                <div class="row">
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Ocupación:</label><select class="form-control" name="ocupacion" required><option value="empleado_publico" selected>Empleado Público</option><option value="empleado_privado">Empleado Privado</option><option value="independiente">Trabajador Independiente</option><option value="comerciante">Comerciante</option></select></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Antigüedad en Empleo (años):</label><input type="number" class="form-control" name="antiguedad_empleo" min="0" max="50" step="0.5" value="10" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Ingresos Mensuales (MXN):</label><input type="number" class="form-control" name="ingresos_mensuales" min="5000" max="200000" value="150000" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Tipo de Comprobante:</label><select class="form-control" name="tipo_comprobante" required><option value="nomina" selected>Nómina</option><option value="estados_cuenta">Estados de Cuenta</option><option value="declaracion">Declaración Fiscal</option><option value="otros">Otros</option></select></div></div>
-                                </div>
-                            </div>
-                            <div class="form-section">
-                                <h5 class="text-info mb-3"><i class="fas fa-home me-2"></i>Información de Vivienda</h5>
-                                <div class="row">
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Antigüedad en Domicilio (años):</label><input type="number" class="form-control" name="antiguedad_domicilio" min="0" max="50" step="0.5" value="9.5" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">¿Cuenta con comprobante de domicilio?</label><select class="form-control" name="comprobante_domicilio" required><option value="si" selected>Sí</option><option value="no">No</option></select></div></div>
-                                    <div class="col-md-12"><div class="mb-3"><label class="form-label">¿Cuenta con comprobante de ingresos?</label><select class="form-control" name="comprobante_ingresos" required><option value="si" selected>Sí</option><option value="no">No</option></select></div></div>
-                                </div>
-                            </div>
-                            <div class="form-section">
-                                <h5 class="text-warning mb-3"><i class="fas fa-history me-2"></i>Historial Crediticio</h5>
-                                <div class="row">
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">FICO Score:</label><input type="number" class="form-control" name="fico_score" min="300" max="850" value="800" required><small class="text-muted">Rango: 300-850</small></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Última Calificación (1=Excelente, 4=Mala):</label><select class="form-control" name="ultima_calificacion" required><option value="1" selected>1 - Excelente</option><option value="2">2 - Buena</option><option value="3">3 - Regular</option><option value="4">4 - Mala</option></select></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Número de Consultas (últimos 12 meses):</label><input type="number" class="form-control" name="numero_consultas" min="0" max="50" value="5" required></div></div>
-                                    <div class="col-md-6"><div class="mb-3"><label class="form-label">Deudas Mensuales Actuales (MXN):</label><input type="number" class="form-control" name="deuda_mensual" min="0" max="100000" value="3000" required></div></div>
-                                </div>
-                            </div>
-                            <div class="text-center">
-                                <button type="submit" class="btn btn-primary btn-lg px-5">
-                                    <i class="fas fa-calculator me-2"></i>Evaluar Crédito
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            <div class="col-lg-4">
-                <div id="resultado-evaluacion" style="display: none;"></div>
-                <div class="card">
-                    <div class="card-header bg-info text-white">
-                        <h5><i class="fas fa-info-circle me-2"></i>Información del Modelo</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="mb-3">
-                            <h6>Variables Evaluadas:</h6>
-                            <ul class="list-unstyled">
-                                <li><i class="fas fa-check text-success me-2"></i>Variables Generales (30%)</li>
-                                <li><i class="fas fa-check text-success me-2"></i>Historial Crediticio (30%)</li>
-                                <li><i class="fas fa-check text-success me-2"></i>Capacidad de Pago (40%)</li>
-                            </ul>
-                        </div>
-                        <div class="mb-3">
-                            <h6>Rangos de Score:</h6>
-                            <div class="d-flex justify-content-between">
-                                <span class="badge bg-danger">200-299</span>
-                                <span class="badge bg-warning">300-349</span>
-                                <span class="badge bg-success">350+</span>
-                            </div>
-                        </div>
-                        <div class="alert alert-info p-2">
-                            <small>
-                                <strong>Tip:</strong> Complete todos los campos con información real para obtener una evaluación precisa.
-                            </small>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div class="card">
+            <h2>🚧 Módulo en Desarrollo</h2>
+            <p>Esta sección contendrá reportes detallados sobre:</p>
+            <ul style="text-align: left; max-width: 500px; margin: 20px auto;">
+                <li>📈 Estadísticas de aprobación por perfil</li>
+                <li>💰 Análisis de montos otorgados</li>
+                <li>⚠️ Factores de rechazo más comunes</li>
+                <li>📊 Tendencias de evaluación</li>
+                <li>🎯 Performance del sistema</li>
+            </ul>
+            <p style="margin-top: 20px;"><em>Próximamente disponible...</em></p>
         </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        document.getElementById('formulario-credito').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const boton = e.target.querySelector('button[type="submit"]');
-            const textoOriginal = boton.innerHTML;
-            boton.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Evaluando...';
-            boton.disabled = true;
-            const formData = new FormData(e.target);
-            const datos = {};
-            for (let [key, value] of formData.entries()) { datos[key] = value; }
-            fetch('/api/evaluar', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(datos)
-            })
-            .then(response => response.json())
-            .then(resultado => {
-                boton.innerHTML = textoOriginal;
-                boton.disabled = false;
-                if (resultado.success) { mostrarResultado(resultado.data); } else { alert('Error: ' + resultado.error); }
-            })
-            .catch(error => {
-                boton.innerHTML = textoOriginal;
-                boton.disabled = false;
-                console.error('Error:', error);
-                alert('Error al procesar la evaluación');
-            });
-        });
-        
-        function mostrarResultado(data) {
-            const contenedor = document.getElementById('resultado-evaluacion');
-            let html = '';
-            if (data.aprobado) {
-                html = `
-                    <div class="card mb-3">
-                        <div class="card-header resultado-aprobado text-white text-center"><h4><i class="fas fa-check-circle me-2"></i>¡CRÉDITO APROBADO!</h4></div>
-                        <div class="card-body">
-                            <div class="text-center mb-4"><div class="score-circle bg-success text-white">${data.score}</div><h5 class="mt-2">Score Crediticio</h5><span class="badge bg-${data.color_riesgo}">${data.nivel_riesgo} Riesgo</span></div>
-                            <div class="row text-center mb-3"><div class="col-12"><h3 class="text-success">$${data.monto_aprobado.toLocaleString()}</h3><p class="text-muted">Monto Aprobado</p></div></div>
-                            <div class="mb-3"><h6>Condiciones:</h6><p><strong>Tasa Anual:</strong> ${(data.tasa_anual * 100).toFixed(1)}%</p><p><strong>TDSR:</strong> ${(data.tdsr * 100).toFixed(1)}%</p></div>
-                            <div class="mb-3"><h6>Opciones de Plazo:</h6>${data.opciones_plazo.map(opcion => `<div class="d-flex justify-content-between border-bottom py-2"><span>${opcion.plazo} meses</span><span class="${opcion.factible ? 'text-success' : 'text-danger'}">$${opcion.pago_mensual.toLocaleString()} ${opcion.factible ? '✓' : '✗'}</span></div>`).join('')}</div>
-                            <button class="btn btn-primary btn-sm w-100" onclick="mostrarDetalles()">Ver Detalles del Scoring</button>
-                        </div>
-                    </div>
-                `;
-            } else {
-                html = `
-                    <div class="card mb-3">
-                        <div class="card-header resultado-rechazado text-white text-center"><h4><i class="fas fa-times-circle me-2"></i>CRÉDITO NO APROBADO</h4></div>
-                        <div class="card-body text-center"><div class="score-circle bg-danger text-white mb-3">${data.score}</div><h6 class="text-danger">Razón:</h6><p>${data.razon}</p>
-                            <div class="alert alert-info mt-3"><small><strong>Sugerencias:</strong><br>• Mejorar historial crediticio<br>• Aumentar ingresos<br>• Reducir deudas actuales</small></div>
-                        </div>
-                    </div>
-                `;
-            }
-            contenedor.innerHTML = html;
-            contenedor.style.display = 'block';
-            window.ultimaEvaluacion = data;
-            contenedor.scrollIntoView({ behavior: 'smooth' });
-        }
-        
-        function mostrarDetalles() {
-            if (!window.ultimaEvaluacion || !window.ultimaEvaluacion.desglose) return;
-            const data = window.ultimaEvaluacion;
-            const modal = `
-                <div class="modal fade" id="modalDetalles" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Detalles del Scoring Crediticio</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-                    <div class="modal-body detalles-scoring">
-                        ${Object.entries(data.desglose).map(([categoria, info]) => `
-                            <div class="mb-4"><h6 class="text-primary">${info.categoria}</h6><div class="progress progress-custom mb-2"><div class="progress-bar" style="width: ${(info.puntos_ponderados / (info.puntos_maximos * info.peso)) * 100}%">${info.puntos_ponderados.toFixed(1)} pts</div></div><small class="text-muted">${info.puntos_obtenidos}/${info.puntos_maximos} puntos (Peso: ${(info.peso * 100)}%)</small>
-                            ${info.detalles ? info.detalles.map(detalle => `<div class="row mt-2"><div class="col-8">${detalle.factor}:</div><div class="col-4 text-end">${detalle.puntos}/${detalle.maximo}</div></div>`).join('') : ''}</div>
-                        `).join('')}
-                        <div class="alert alert-success"><strong>Score Final: ${data.score} puntos</strong><br><small>Calculado: ${data.fecha}</small></div>
-                    </div>
-                </div></div></div>
-            `;
-            document.body.insertAdjacentHTML('beforeend', modal);
-            const modalElement = new bootstrap.Modal(document.getElementById('modalDetalles'));
-            modalElement.show();
-            document.getElementById('modalDetalles').addEventListener('hidden.bs.modal', function() { this.remove(); });
-        }
-    </script>
-</body>
-</html>
-'''
-TEMPLATE_CASOS = '''
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Casos de Estudio Calibrados</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <style>
-        .caso-card { transition: all 0.3s ease; cursor: pointer; }
-        .caso-card:hover { transform: translateY(-5px); box-shadow: 0 8px 15px rgba(0,0,0,0.1); }
-        .perfil-badge { position: absolute; top: 10px; right: 10px; }
-        .resultado-preview { border-left: 4px solid #28a745; padding-left: 15px; }
-        .score-display { font-size: 2rem; font-weight: bold; }
-        .bonus-indicator { position: absolute; top: -8px; right: -8px; }
-    </style>
-</head>
-<body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="/">
-                <i class="fas fa-rocket me-2"></i>Casos de Estudio Calibrados
-            </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/">Inicio</a>
-                <a class="nav-link" href="/simulador">Simulador</a>
-            </div>
-        </div>
-    </nav>
-
-    <div class="container mt-4">
-        <div class="alert alert-info">
-            <i class="fas fa-magic me-2"></i><strong>Casos Calibrados V2.0</strong> - Perfiles optimizados con bonificaciones automáticas y mayor tasa de aprobación
-        </div>
-        <div class="row mb-4">
-            <div class="col-12 text-center">
-                <h2><i class="fas fa-users text-primary me-2"></i>5 Casos de Estudio Calibrados</h2>
-                <p class="lead">Explora diferentes perfiles crediticios con el modelo optimizado V2.0</p>
-            </div>
-        </div>
-        <div class="row">
-            {% for caso_id, caso in casos.items() %}
-            <div class="col-lg-4 mb-4">
-                <div class="card caso-card h-100 position-relative border-{{ 'primary' if 'excelente' in caso_id else 'success' if 'alto' in caso_id else 'warning' if 'medio' in caso_id else 'info' if 'joven' in caso_id else 'secondary' }}" onclick="evaluarCaso('{{ caso_id }}')">
-                    <span class="badge perfil-badge bg-{{ 'primary' if 'excelente' in caso_id else 'success' if 'alto' in caso_id else 'warning' if 'medio' in caso_id else 'info' if 'joven' in caso_id else 'secondary' }}">
-                        {{ 'EXCELENTE' if 'excelente' in caso_id else 'ALTO' if 'alto' in caso_id else 'MEDIO' if 'medio' in caso_id else 'JOVEN' if 'joven' in caso_id else 'BÁSICO' }}
-                    </span>
-                    {% if 'joven' in caso_id or 'excelente' in caso_id %}
-                    <span class="badge bg-success bonus-indicator" title="Bonificaciones disponibles"><i class="fas fa-gift"></i></span>
-                    {% endif %}
-                    <div class="card-body">
-                        <h5 class="card-title text-{{ 'primary' if 'excelente' in caso_id else 'success' if 'alto' in caso_id else 'warning' if 'medio' in caso_id else 'info' if 'joven' in caso_id else 'secondary' }}">
-                            <i class="fas fa-{{ 'crown' if 'excelente' in caso_id else 'star' if 'alto' in caso_id else 'balance-scale' if 'medio' in caso_id else 'seedling' if 'joven' in caso_id else 'user' }} me-2"></i>
-                            {{ caso.nombre }}
-                        </h5>
-                        <p class="card-text text-muted">{{ caso.descripcion }}</p>
-                        <div class="row mb-3">
-                            <div class="col-6"><small class="text-muted">Ingresos:</small><br><strong>${"{:,}".format(caso.datos.ingresos_mensuales|int) }</strong></div>
-                            <div class="col-6"><small class="text-muted">FICO Score:</small><br><strong>{{ caso.datos.fico_score }}</strong></div>
-                        </div>
-                        <div class="row mb-3">
-                            <div class="col-6"><small class="text-muted">Ocupación:</small><br><strong>{{ caso.datos.ocupacion.replace('_', ' ').title() }}</strong></div>
-                            <div class="col-6"><small class="text-muted">Edad:</small><br><strong>{{ caso.datos.edad }} años</strong>
-                                {% if caso.datos.edad|int <= 30 %}<span class="badge bg-success ms-1" title="Bonus joven">+25</span>{% endif %}
-                            </div>
-                        </div>
-                        {% if caso.datos.nivel_estudios == 'universidad' %}<div class="mb-3"><span class="badge bg-info"><i class="fas fa-graduation-cap me-1"></i>Educación Superior +20 pts</span></div>{% endif %}
-                        <div id="resultado-{{ caso_id }}" class="resultado-preview" style="display: none;"></div>
-                        <div class="text-center mt-3">
-                            <button class="btn btn-{{ 'primary' if 'excelente' in caso_id else 'success' if 'alto' in caso_id else 'warning' if 'medio' in caso_id else 'info' if 'joven' in caso_id else 'secondary' }}" onclick="event.stopPropagation(); evaluarCaso('{{ caso_id }}')">
-                                <i class="fas fa-rocket me-2"></i>Evaluar con Modelo Calibrado
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-        <div class="row mt-5">
-            <div class="col-12">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h5><i class="fas fa-chart-bar text-primary me-2"></i>Análisis Comparativo - Modelo Calibrado</h5>
-                        <p>Con la nueva calibración V2.0, estos casos muestran mejores resultados:</p>
-                        <div class="row">
-                            <div class="col-md-4"><h6 class="text-primary">Perfil Excelente</h6><ul class="list-unstyled"><li><i class="fas fa-crown text-primary me-2"></i>Score esperado: 400+ pts</li><li><i class="fas fa-star text-primary me-2"></i>Monto: $120,000+</li><li><i class="fas fa-percentage text-primary me-2"></i>Tasa: 20-22% anual</li><li><i class="fas fa-check text-primary me-2"></i>Riesgo muy bajo</li></ul></div>
-                            <div class="col-md-4"><h6 class="text-success">Perfiles Alto/Medio</h6><ul class="list-unstyled"><li><i class="fas fa-arrow-up text-success me-2"></i>Scores mejorados +30%</li><li><i class="fas fa-dollar-sign text-success me-2"></i>Montos más altos</li><li><i class="fas fa-clock text-success me-2"></i>Hasta 24 meses</li><li><i class="fas fa-thumbs-up text-success me-2"></i>Mayor aprobación</li></ul></div>
-                            <div class="col-md-4"><h6 class="text-info">Perfil Joven/Básico</h6><ul class="list-unstyled"><li><i class="fas fa-gift text-info me-2"></i>Bonificaciones automáticas</li><li><i class="fas fa-graduation-cap text-info me-2"></i>+20 pts por universidad</li><li><i class="fas fa-seedling text-info me-2"></i>+25 pts perfil joven</li><li><i class="fas fa-rocket text-info me-2"></i>Ahora viables para crédito</li></ul></div>
-                        </div>
-                        <div class="text-center mt-4">
-                            <div class="row">
-                                <div class="col-md-3"><div class="card border-success"><div class="card-body text-center p-2"><h4 class="text-success mb-0">95%+</h4><small>Tasa Aprobación</small></div></div></div>
-                                <div class="col-md-3"><div class="card border-info"><div class="card-body text-center p-2"><h4 class="text-info mb-0">1.5x</h4><small>Factor Scoring</small></div></div></div>
-                                <div class="col-md-3"><div class="card border-warning"><div class="card-body text-center p-2"><h4 class="text-warning mb-0">+45</h4><small>Bonificaciones Max</small></div></div></div>
-                                <div class="col-md-3"><div class="card border-primary"><div class="card-body text-center p-2"><h4 class="text-primary mb-0">200</h4><small>Score Mínimo</small></div></div></div>
-                            </div>
-                            <div class="mt-4">
-                                <a href="/simulador" class="btn btn-primary btn-lg me-3"><i class="fas fa-calculator me-2"></i>Probar tu Propio Perfil</a>
-                                <a href="/admin/login" class="btn btn-outline-danger"><i class="fas fa-cog me-2"></i>Panel Administrador</a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        function evaluarCaso(casoId) {
-            const button = document.querySelector(`#resultado-${casoId}`).parentElement.querySelector('button');
-            const originalText = button.innerHTML;
-            button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Evaluando...';
-            button.disabled = true;
-            fetch(`/api/caso/${casoId}`).then(response => response.json()).then(caso => {
-                return fetch('/api/evaluar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(caso.datos) });
-            }).then(response => response.json()).then(resultado => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                if (resultado.success) { mostrarResultadoCaso(casoId, resultado.data); } else { alert('Error: ' + resultado.error); }
-            }).catch(error => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                console.error('Error:', error);
-                alert('Error al evaluar el caso');
-            });
-        }
-        function mostrarResultadoCaso(casoId, data) {
-            const contenedor = document.getElementById(`resultado-${casoId}`);
-            let html = ''; let badgeClass = 'success'; let iconClass = 'check-circle';
-            if (!data.aprobado) { badgeClass = 'warning'; iconClass = 'exclamation-triangle'; } else if (data.score < 300) { badgeClass = 'info'; iconClass = 'info-circle'; }
-            if (data.aprobado) {
-                html = `
-                    <div class="mb-3">
-                        <div class="d-flex align-items-center mb-2"><i class="fas fa-${iconClass} text-${badgeClass} me-2"></i><span class="badge bg-${badgeClass}">✅ APROBADO</span><span class="badge bg-secondary ms-2">Modelo V2.0</span></div>
-                        <div class="row"><div class="col-6"><div class="score-display text-${badgeClass}">${data.score}</div><small class="text-muted">Score Calibrado</small></div><div class="col-6"><div class="h5">$${data.monto_aprobado.toLocaleString()}</div><small class="text-muted">Monto Aprobado</small></div></div>
-                        <div class="mt-2"><div class="row"><div class="col-6"><small><strong>Tasa:</strong> ${(data.tasa_anual * 100).toFixed(1)}%</small></div><div class="col-6"><small><strong>Riesgo:</strong> ${data.nivel_riesgo}</small></div></div><div class="row"><div class="col-6"><small><strong>TDSR:</strong> ${(data.tdsr * 100).toFixed(1)}%</small></div><div class="col-6"><small><strong>Plazos:</strong> ${data.opciones_plazo.filter(o => o.factible).length} disponibles</small></div></div></div>
-                        ${data.desglose && data.desglose.generales && data.desglose.generales.bonificaciones && data.desglose.generales.bonificaciones.length > 0 ? `<div class="mt-2"><small class="text-success"><strong>Bonificaciones aplicadas:</strong><br>${data.desglose.generales.bonificaciones.map(b => `• ${b}`).join('<br>')}</small></div>` : ''}
-                        <div class="mt-2"><small class="text-muted">Mejores plazos:</small><br>${data.opciones_plazo.filter(o => o.factible).slice(0, 3).map(opcion => `<span class="badge bg-outline-${opcion.recomendacion === 'Excelente' ? 'success' : opcion.recomendacion === 'Buena' ? 'info' : 'warning'} me-1">${opcion.plazo}m: $${opcion.pago_mensual.toLocaleString()}</span>`).join('')}</div>
-                    </div>
-                `;
-            } else {
-                html = `
-                    <div class="mb-3">
-                        <div class="d-flex align-items-center mb-2"><i class="fas fa-${iconClass} text-${badgeClass} me-2"></i><span class="badge bg-${badgeClass}">⚠️ PENDIENTE</span><span class="badge bg-secondary ms-2">Modelo V2.0</span></div>
-                        <div class="score-display text-${badgeClass}">${data.score}</div><small class="text-muted">Score Calculado</small>
-                        <div class="mt-2"><small class="text-${badgeClass}"><strong>Motivo:</strong><br>${data.razon}</small></div>
-                        ${data.recomendaciones && data.recomendaciones.length > 0 ? `<div class="mt-2"><small class="text-info"><strong>Plan de mejora:</strong><br>${data.recomendaciones.slice(0, 2).map(rec => `• ${rec}`).join('<br>')}</small></div>` : ''}
-                    </div>
-                `;
-            }
-            contenedor.innerHTML = html;
-            contenedor.style.display = 'block';
-            contenedor.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-    </script>
 </body>
 </html>
 '''
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print("🚀 Iniciando Simulador de Crédito Hotmart")
+    print("📊 Sistema de Evaluación Crediticia Integral")
+    print("=" * 50)
+    
+    load_business_rules()
+    print(f"✅ Reglas de negocio cargadas")
+    print(f"📋 Score mínimo: {business_rules['score_minimo']}")
+    print(f"💰 Monto máximo AAA: ${business_rules['monto_maximo_por_perfil']['AAA']:,}")
+    print(f"⚡ Ratio deuda máximo: {business_rules['ratio_deuda_ingreso_maximo']:.0%}")
+    
+    print("\n🌐 Acceso al sistema:")
+    print("   • Evaluación: http://localhost:5000/")
+    print("   • Administración: http://localhost:5000/admin")
+    print("   • Reportes: http://localhost:5000/reports")
+    print("   • API Test AAA: http://localhost:5000/api/test/aaa")
+    print("   • API Reglas: http://localhost:5000/api/rules")
+    print("=" * 50)
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
